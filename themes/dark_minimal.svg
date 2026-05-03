@@ -1,0 +1,35 @@
+<svg viewBox="0 0 690 1227" xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <linearGradient id="gm" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0%" stop-color="#111115"/>
+    <stop offset="100%" stop-color="#08080b"/>
+  </linearGradient>
+  <linearGradient id="acc" x1="0" y1="0" x2="1" y2="0">
+    <stop offset="0%" stop-color="#1a8cff"/>
+    <stop offset="100%" stop-color="#ff6b00"/>
+  </linearGradient>
+  <linearGradient id="vbot" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0%" stop-color="#000" stop-opacity="0"/>
+    <stop offset="100%" stop-color="#000" stop-opacity="0.6"/>
+  </linearGradient>
+</defs>
+<rect width="690" height="1227" fill="url(#gm)"/>
+<rect x="0" y="0" width="690" height="3" fill="url(#acc)"/>
+<rect x="0" y="1224" width="690" height="3" fill="url(#acc)" opacity="0.4"/>
+<rect x="0" y="3" width="1" height="1221" fill="#1a8cff" opacity="0.5"/>
+<rect x="689" y="3" width="1" height="1221" fill="#ff6b00" opacity="0.5"/>
+<polygon points="0,0 40,0 0,40" fill="#1a8cff" opacity="0.1"/>
+<polygon points="690,0 650,0 690,40" fill="#ff6b00" opacity="0.1"/>
+<polygon points="0,1227 40,1227 0,1187" fill="#1a8cff" opacity="0.08"/>
+<polygon points="690,1227 650,1227 690,1187" fill="#ff6b00" opacity="0.08"/>
+<rect x="80" y="0" width="1" height="1227" fill="#ffffff" opacity="0.015"/>
+<rect x="200" y="0" width="1" height="1227" fill="#ffffff" opacity="0.015"/>
+<rect x="330" y="0" width="1" height="1227" fill="#ffffff" opacity="0.02"/>
+<rect x="460" y="0" width="1" height="1227" fill="#ffffff" opacity="0.015"/>
+<rect x="590" y="0" width="1" height="1227" fill="#ffffff" opacity="0.015"/>
+<rect x="0" y="286" width="690" height="1" fill="#ffffff" opacity="0.015"/>
+<rect x="0" y="614" width="690" height="1" fill="#ffffff" opacity="0.02"/>
+<rect x="0" y="942" width="690" height="1" fill="#ffffff" opacity="0.015"/>
+<rect x="0" y="999" width="690" height="228" fill="url(#vbot)"/>
+<circle cx="345" cy="614" r="80" fill="#ffffff" opacity="0.008"/>
+</svg>

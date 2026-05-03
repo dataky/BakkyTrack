@@ -1,0 +1,32 @@
+<svg viewBox="0 0 690 388" xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <linearGradient id="gd" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0%" stop-color="#1a0101"/>
+    <stop offset="100%" stop-color="#0e0202"/>
+  </linearGradient>
+  <radialGradient id="glowR" cx="50%" cy="50%" r="60%">
+    <stop offset="0%" stop-color="#ff1744" stop-opacity="0.16"/>
+    <stop offset="100%" stop-color="#ff1744" stop-opacity="0"/>
+  </radialGradient>
+  <linearGradient id="vbot" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0%" stop-color="#000" stop-opacity="0"/>
+    <stop offset="100%" stop-color="#000" stop-opacity="0.7"/>
+  </linearGradient>
+</defs>
+<rect width="690" height="388" fill="url(#gd)"/>
+<rect width="690" height="388" fill="url(#glowR)"/>
+<polygon points="0,0 30,0 0,30" fill="#ff1744" opacity="0.35"/>
+<polygon points="0,0 8,0 0,8" fill="#ff4569" opacity="0.6"/>
+<polygon points="690,0 660,0 690,30" fill="#ff1744" opacity="0.35"/>
+<polygon points="690,388 690,358 660,388" fill="#c0001a" opacity="0.3"/>
+<polygon points="0,388 30,388 0,358" fill="#c0001a" opacity="0.3"/>
+<polygon points="100,0 106,0 61,388 55,388" fill="#ff3d57" opacity="0.06"/>
+<polygon points="300,0 304,0 259,388 255,388" fill="#ff3d57" opacity="0.08"/>
+<polygon points="500,0 504,0 540,388 536,388" fill="#ff3d57" opacity="0.05"/>
+<rect x="0" y="0" width="690" height="2" fill="#ff1744" opacity="0.5"/>
+<rect x="0" y="386" width="690" height="2" fill="#c0001a" opacity="0.4"/>
+<rect x="0" y="316" width="690" height="72" fill="url(#vbot)"/>
+<circle cx="60" cy="54" r="2" fill="#ff4569" opacity="0.6"/>
+<circle cx="345" cy="23" r="3" fill="#ff4569" opacity="0.4"/>
+<circle cx="640" cy="59" r="1.5" fill="#ff4569" opacity="0.5"/>
+</svg>

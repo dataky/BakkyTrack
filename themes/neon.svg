@@ -1,0 +1,39 @@
+<svg viewBox="0 0 690 388" xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <linearGradient id="gn" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0%" stop-color="#08001a"/>
+    <stop offset="100%" stop-color="#000814"/>
+  </linearGradient>
+  <radialGradient id="glowL" cx="20%" cy="50%" r="50%">
+    <stop offset="0%" stop-color="#7c00ff" stop-opacity="0.2"/>
+    <stop offset="100%" stop-color="#7c00ff" stop-opacity="0"/>
+  </radialGradient>
+  <radialGradient id="glowR" cx="80%" cy="50%" r="50%">
+    <stop offset="0%" stop-color="#00f0ff" stop-opacity="0.15"/>
+    <stop offset="100%" stop-color="#00f0ff" stop-opacity="0"/>
+  </radialGradient>
+  <linearGradient id="vbot" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0%" stop-color="#000" stop-opacity="0"/>
+    <stop offset="100%" stop-color="#000" stop-opacity="0.75"/>
+  </linearGradient>
+</defs>
+<rect width="690" height="388" fill="url(#gn)"/>
+<rect width="690" height="388" fill="url(#glowL)"/>
+<rect width="690" height="388" fill="url(#glowR)"/>
+<polygon points="0,0 30,0 0,30" fill="#7c00ff" opacity="0.5"/>
+<polygon points="690,0 660,0 690,30" fill="#00f0ff" opacity="0.5"/>
+<polygon points="0,388 30,388 0,358" fill="#5500cc" opacity="0.4"/>
+<polygon points="690,388 690,358 660,388" fill="#00c8d8" opacity="0.4"/>
+<polygon points="80,0 84,0 39,388 35,388" fill="#7c00ff" opacity="0.1"/>
+<polygon points="260,0 263,0 298,388 295,388" fill="#00f0ff" opacity="0.07"/>
+<polygon points="345,0 347,0 382,388 380,388" fill="#00f0ff" opacity="0.12"/>
+<polygon points="540,0 543,0 578,388 575,388" fill="#00f0ff" opacity="0.09"/>
+<rect x="0" y="0" width="690" height="1.5" fill="#7c00ff" opacity="0.7"/>
+<rect x="0" y="386.5" width="690" height="1.5" fill="#00f0ff" opacity="0.5"/>
+<rect x="0" y="316" width="690" height="72" fill="url(#vbot)"/>
+<circle cx="60" cy="50" r="2.5" fill="#a040ff" opacity="0.7"/>
+<circle cx="345" cy="27" r="3" fill="#c060ff" opacity="0.5"/>
+<circle cx="640" cy="45" r="2.5" fill="#40e8ff" opacity="0.6"/>
+<circle cx="250" cy="352" r="1.5" fill="#7c00ff" opacity="0.4"/>
+<circle cx="440" cy="343" r="1.5" fill="#00f0ff" opacity="0.4"/>
+</svg>
