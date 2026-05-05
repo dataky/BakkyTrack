@@ -1366,6 +1366,8 @@ class MatchService:
         self._prev_tgt_stats      = {}
         self._match_result_saved  = False  # True dès que MatchEnded a enregistré un résultat
         self._match_started       = False  # True dès que RoundStarted/CountdownBegin reçu
+        self._had_opponent        = False  # True dès qu'on a vu les 2 équipes (pas freeplay)
+        self._last_update_log_t   = 0.0   # Throttle du log UpdateState (max 1/s)
         # ── Connexion ────────────────────────────────────────────────────
         self._running  = True
         self._tcp_sock = None
@@ -1459,7 +1461,16 @@ class MatchService:
                     if end == 0 and depth != 0: break
                     msg = buf[:end + 1]; buf = buf[end + 1:]
                     try:
-                        self.signals.log_event.emit(msg.decode(errors="replace")[:80])
+                        # Throttle UpdateState dans le log (peut arriver à 120/s) :
+                        # n'afficher qu'une fois par seconde pour éviter le gel de l'UI.
+                        _now = time.monotonic()
+                        _decoded = msg.decode(errors="replace")
+                        _is_update = _decoded.lstrip().startswith('{"Event": "UpdateState"') \
+                                     or '"UpdateState"' in _decoded[:60]
+                        if not _is_update or (_now - self._last_update_log_t) >= 1.0:
+                            self.signals.log_event.emit(_decoded[:80])
+                            if _is_update:
+                                self._last_update_log_t = _now
                     except RuntimeError:
                         return
                     try:
@@ -1529,6 +1540,15 @@ class MatchService:
                 self._last_scores[tnum] = score
                 self.team_scores[tnum]  = score
 
+            # Vraie partie compétitive = des joueurs physiquement présents
+            # dans les deux équipes. En freeplay, le jeu envoie quand même
+            # Teams[0] et Teams[1] dans les scores (score=0) sans adversaire,
+            # ce qui déclencherait un faux résultat. Vérifier la liste
+            # Players est plus fiable : en freeplay il n'y a que toi.
+            teams_with_players = {p.get("TeamNum") for p in players}
+            if 0 in teams_with_players and 1 in teams_with_players:
+                self._had_opponent = True
+
             if self.my_team is None:
                 platform    = self.config.get("platform", "epic").lower()
                 _PLAT_PREFIX = {
@@ -1597,7 +1617,9 @@ class MatchService:
             # pendant que my_team et team_scores sont encore valides pour elle.
             # On ne peut plus attendre MatchDestroyed car d'ici là l'état aura
             # été écrasé par la nouvelle partie.
-            if not self._match_result_saved and self._match_started:
+            # _had_opponent évite de déduire un résultat depuis le freeplay
+            # (qui n'a qu'une seule équipe).
+            if not self._match_result_saved and self._match_started and self._had_opponent:
                 my = self.my_team or self._last_known_my_team
                 if my is not None and self.team_scores:
                     my_score  = self.team_scores.get(my, 0)
@@ -1611,6 +1633,7 @@ class MatchService:
             # Réinitialisation complète pour la nouvelle partie
             self._match_result_saved = False
             self._match_started      = False
+            self._had_opponent       = False
             self.my_team             = None
             self._last_known_my_team = None
             self.team_scores         = {}
@@ -1698,7 +1721,8 @@ class MatchService:
             # GARDE : _match_started doit être True pour qu'on ait vraiment joué
             # un round — évite les faux résultats quand MatchDestroyed d'une
             # ancienne partie arrive après que la nouvelle partie a déjà démarré.
-            if not self._match_result_saved and self._match_started:
+            # _had_opponent évite les faux résultats depuis le freeplay.
+            if not self._match_result_saved and self._match_started and self._had_opponent:
                 my = self.my_team or self._last_known_my_team
                 if my is not None and self.team_scores:
                     my_score  = self.team_scores.get(my, 0)
@@ -1724,6 +1748,7 @@ class MatchService:
             self._prev_tgt_stats      = {}
             self._match_result_saved  = False
             self._match_started       = False
+            self._had_opponent        = False
             self.current_players      = []
             self.signals.players_updated.emit([])
 
@@ -1964,6 +1989,7 @@ class MainApp(QMainWindow):
         self._overlay_timer.start(REFRESH_MS)
 
         self._running = True
+        self._last_sse_stats: dict = {}   # Cache pour éviter les SSE redondants
         self._start_http_server()
         self.match.start()
         self._start_hotkey_listener()
@@ -2062,7 +2088,10 @@ class MainApp(QMainWindow):
                 if not os.path.exists(path):
                     self.signals.log_event.emit(f"[Son] Fichier introuvable: {f}")
                     return
-                pygame.mixer.init()
+                # Initialiser le mixer une seule fois — re-init à chaque son
+                # provoque un freeze audible et un gel de l'UI.
+                if not pygame.mixer.get_init():
+                    pygame.mixer.init()
                 snd = pygame.mixer.Sound(path)
                 snd.play()
                 ms = int(snd.get_length() * 1000) + 100
@@ -2123,7 +2152,11 @@ class MainApp(QMainWindow):
         stats = self._build_stats_dict()
         self.overlay_win.update_stats(stats)
         self.overlay_tab.refresh_preview(stats)
-        self._push_sse("stats", stats)
+        # Ne pousser le SSE que si les stats ont changé — évite d'inonder
+        # les clients OBS de messages identiques toutes les 2 secondes.
+        if stats != self._last_sse_stats:
+            self._last_sse_stats = stats
+            self._push_sse("stats", stats)
 
     # ── Players overlay hotkey ────────────────────────────────────────────
     def _start_hotkey_listener(self):
@@ -2136,14 +2169,24 @@ class MainApp(QMainWindow):
             import ctypes
         except ImportError:
             return
-        prev_pressed = False
+        prev_pressed  = False
+        cached_key    = None
+        cached_vk     = None
+        # Rafraîchissement lent de la config clé (toutes les ~2s) pour éviter
+        # un dict lookup + _key_to_vk() toutes les 40ms.
+        _cfg_refresh  = 0
         while self.match._running:
             time.sleep(0.04)
-            key_str = self.config.get("players_overlay_key", "key:f7")
-            vk = _key_to_vk(key_str)
-            if vk is None:
+            _cfg_refresh += 1
+            if _cfg_refresh >= 50:   # ~2 secondes
+                _cfg_refresh = 0
+                new_key = self.config.get("players_overlay_key", "key:f7")
+                if new_key != cached_key:
+                    cached_key = new_key
+                    cached_vk  = _key_to_vk(new_key)
+            if cached_vk is None:
                 continue
-            state   = ctypes.windll.user32.GetAsyncKeyState(vk)
+            state   = ctypes.windll.user32.GetAsyncKeyState(cached_vk)
             pressed = bool(state & 0x8000)
             if pressed and not prev_pressed:
                 QTimer.singleShot(0, self._toggle_players_overlay)
@@ -2266,9 +2309,60 @@ class MainApp(QMainWindow):
             try: self._sse_clients.remove(w)
             except ValueError: pass
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  AUTO-UPDATER — télécharge les fichiers manquants depuis GitHub au démarrage
+# ─────────────────────────────────────────────────────────────────────────────
+GITHUB_RAW = "https://raw.githubusercontent.com/dataky/BakkyTrack/main"
+
+# (chemin_local_relatif_à_BASE_DIR, url_raw_github)
+_REMOTE_FILES = [
+    # ── Overlays ──────────────────────────────────────────────────────────────
+    ("overlays/compact.py",       f"{GITHUB_RAW}/BakkyTrack/overlays/compact.py"),
+    ("overlays/banner.py",        f"{GITHUB_RAW}/BakkyTrack/overlays/banner.py"),
+    ("overlays/banner_classic.py",f"{GITHUB_RAW}/BakkyTrack/overlays/banner_classic.py"),
+    ("overlays/pill.py",          f"{GITHUB_RAW}/BakkyTrack/overlays/pill.py"),
+    ("overlays/neon.py",          f"{GITHUB_RAW}/BakkyTrack/overlays/neon.py"),
+    ("overlays/sidebar.py",       f"{GITHUB_RAW}/BakkyTrack/overlays/sidebar.py"),
+    ("overlays/gauge.py",         f"{GITHUB_RAW}/BakkyTrack/overlays/gauge.py"),
+    ("overlays/glassmorph.py",    f"{GITHUB_RAW}/BakkyTrack/overlays/glassmorph.py"),
+    ("overlays/scoreboard.py",    f"{GITHUB_RAW}/BakkyTrack/overlays/scoreboard.py"),
+    ("overlays/hud.py",           f"{GITHUB_RAW}/BakkyTrack/overlays/hud.py"),
+    ("overlays/vivid.py",         f"{GITHUB_RAW}/BakkyTrack/overlays/vivid.py"),
+    # ── Thèmes SVG ────────────────────────────────────────────────────────────
+    ("themes/rl_classic.svg",     f"{GITHUB_RAW}/themes/rl_classic.svg"),
+    ("themes/victory.svg",        f"{GITHUB_RAW}/themes/victory.svg"),
+    ("themes/defeat.svg",         f"{GITHUB_RAW}/themes/defeat.svg"),
+    ("themes/neon.svg",           f"{GITHUB_RAW}/themes/neon.svg"),
+    ("themes/dark_minimal.svg",   f"{GITHUB_RAW}/themes/dark_minimal.svg"),
+    # ── Icône ─────────────────────────────────────────────────────────────────
+    ("logo.ico",                  f"{GITHUB_RAW}/BakkyTrack/logo.ico"),
+]
+
+def _bootstrap():
+    """Télécharge les fichiers manquants depuis GitHub. Appelé avant l'UI."""
+    missing = [
+        (local, url) for local, url in _REMOTE_FILES
+        if not os.path.exists(os.path.join(BASE_DIR, local))
+    ]
+    if not missing:
+        return
+
+    print(f"[BakkyTrack] {len(missing)} fichier(s) manquant(s), téléchargement...")
+    for local, url in missing:
+        dest = os.path.join(BASE_DIR, local)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        try:
+            with urllib.request.urlopen(url, timeout=10) as r:
+                with open(dest, "wb") as f:
+                    f.write(r.read())
+            print(f"  ✓ {local}")
+        except Exception as e:
+            print(f"  ✗ {local} — {e}")
+
 #  ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
+    _bootstrap()   # télécharge les fichiers manquants depuis GitHub
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setStyleSheet(APP_STYLE)
