@@ -2,7 +2,7 @@
 overlay_widgets.py — Tous les widgets overlay de RL Tracker.
 Importé par rl_tracker.py : from overlay_widgets import *
 """
-import os, sys, time
+import os, sys, time, math
 from PyQt6.QtCore    import Qt, QTimer, QRectF, QByteArray, QPointF, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QMainWindow, QVBoxLayout, QHBoxLayout,
@@ -85,7 +85,8 @@ class SvgBackground(QWidget):
     C'est lui qui est le central widget — pas QMainWindow directement."""
     def __init__(self, svg_name="dark_minimal", parent=None):
         super().__init__(parent)
-        self._renderer = QSvgRenderer()
+        self._renderer  = QSvgRenderer()
+        self._bg_pixmap = None   # Cache pixmap — invalide lors d'un changement de thème
         self.set_theme(svg_name)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -96,16 +97,30 @@ class SvgBackground(QWidget):
         data = SVG_BACKGROUNDS.get(name, b"")
         if data:
             self._renderer.load(QByteArray(data))
+        self._bg_pixmap = None   # Invalide le cache — sera reconstruit au prochain paint
         self.update()
 
-    def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    def _rebuild_pixmap(self):
+        """Rend le SVG dans un QPixmap aux dimensions actuelles (mis en cache)."""
+        from PyQt6.QtGui import QPixmap
+        px = QPixmap(self.size())
+        px.fill(QColor(10, 12, 18))
         if self._renderer.isValid():
-            self._renderer.render(p, QRectF(self.rect()))
-        else:
-            # Fallback fond sombre si SVG absent
-            p.fillRect(self.rect(), QColor(10, 12, 18))
+            painter = QPainter(px)
+            painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            self._renderer.render(painter, QRectF(px.rect()))
+            painter.end()
+        self._bg_pixmap = px
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._bg_pixmap = None   # Taille changée → invalide le cache
+
+    def paintEvent(self, event):
+        if self._bg_pixmap is None or self._bg_pixmap.size() != self.size():
+            self._rebuild_pixmap()
+        p = QPainter(self)
+        p.drawPixmap(0, 0, self._bg_pixmap)
         p.end()
 
     def add_widget(self, w):
@@ -1049,7 +1064,6 @@ class _GaugeCard(QWidget):
         self._lbl_title.setGeometry(cx - 55, cy - 58, 110, 16)
 
     def paintEvent(self, event):
-        import math
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
@@ -1156,10 +1170,11 @@ class _TickerCard(QWidget):
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(640, 26)
-        self._text   = "MMR: --   |   0W  0L   |   STREAK: --   |   WIN RATE: --%"
-        self._offset = 0
-        self._fm_w   = 0   # largeur du texte mesuré
-        self._timer  = QTimer(self)
+        self._text      = "MMR: --   |   0W  0L   |   STREAK: --   |   WIN RATE: --%"
+        self._text_prev = ""    # Détecte les changements pour invalider _fm_w
+        self._offset    = 0
+        self._fm_w      = 0    # Largeur du texte — recalculée seulement quand _text change
+        self._timer     = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(30)
 
@@ -1204,7 +1219,11 @@ class _TickerCard(QWidget):
         p.setFont(f_text)
 
         fm = p.fontMetrics()
-        self._fm_w = fm.horizontalAdvance(self._text)
+        # Recalcule la largeur seulement si le texte a changé — évite
+        # un horizontalAdvance() coûteux sur chaque frame (33fps).
+        if self._text != self._text_prev:
+            self._fm_w      = fm.horizontalAdvance(self._text)
+            self._text_prev = self._text
         if self._offset == 0:
             self._offset = w  # démarre hors écran
 
