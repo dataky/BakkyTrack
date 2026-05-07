@@ -2,15 +2,15 @@
 overlay_widgets.py — Tous les widgets overlay de RL Tracker.
 Importé par rl_tracker.py : from overlay_widgets import *
 """
-import os, sys, time, math
-from PyQt6.QtCore    import Qt, QTimer, QRectF, QByteArray, QPointF, pyqtSignal
+import os, sys, time, math, urllib.parse
+from PyQt6.QtCore    import Qt, QTimer, QRectF, QByteArray, QPointF, pyqtSignal, QUrl
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QMainWindow, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QFrame, QScrollArea, QCheckBox, QStackedWidget
 )
 from PyQt6.QtGui import (
     QColor, QCursor, QPainter, QBrush, QPen, QLinearGradient, QRadialGradient,
-    QFont, QPolygonF
+    QFont, QPolygonF, QDesktopServices
 )
 from PyQt6.QtSvg import QSvgRenderer
 
@@ -30,6 +30,31 @@ if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ── Rank icon helpers ──────────────────────────────────────────────────────────
+_RANK_FOLDER = os.path.join(BASE_DIR, "all rank")
+_rank_pixmap_cache: dict = {}
+
+def get_rank_pixmap(tier_id: int, size: int = 40):
+    """Charge et met en cache l'icône de rang depuis le dossier 'all rank'.
+    tier_id : 0 = Unranked, 1-22 = Bronze I → SSL, 23 = unsynced.
+    Retourne un QPixmap ou None si le fichier est introuvable.
+    """
+    from PyQt6.QtGui import QPixmap
+    key = (tier_id, size)
+    if key in _rank_pixmap_cache:
+        return _rank_pixmap_cache[key]
+    path = os.path.join(_RANK_FOLDER, f"{tier_id}.png")
+    if os.path.exists(path):
+        pm = QPixmap(path)
+        if not pm.isNull():
+            scaled = pm.scaled(size, size,
+                               Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+            _rank_pixmap_cache[key] = scaled
+            return scaled
+    _rank_pixmap_cache[key] = None
+    return None
 
 # ── Helpers UI ────────────────────────────────────────────────────────────────
 def card(parent=None, bg=C_BG2):
@@ -253,10 +278,30 @@ class _GlassCard(QWidget):
 class _CompactCard(_GlassCard):
     def __init__(self):
         super().__init__()
-        self.setFixedSize(224, 172)
+        self.setFixedSize(224, 210)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 14, 14, 12)
         lay.setSpacing(6)
+
+        # ── Ligne rang : icône + texte ────────────────────────────────────
+        rank_row = QHBoxLayout()
+        rank_lbl_w = QLabel("RANG")
+        rank_lbl_w.setStyleSheet(
+            f"color:{C_MUTE};font-size:9px;letter-spacing:1.2px;background:transparent;")
+        self.v_rank_icon = QLabel()
+        self.v_rank_icon.setFixedSize(32, 32)
+        self.v_rank_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.v_rank_icon.setStyleSheet("background:transparent;")
+        self.v_rank_name = QLabel("--")
+        self.v_rank_name.setStyleSheet(
+            f"color:{C_TEXT};font-size:11px;font-weight:700;background:transparent;")
+        rank_row.addWidget(rank_lbl_w)
+        rank_row.addStretch()
+        rank_row.addWidget(self.v_rank_icon)
+        rank_row.addSpacing(4)
+        rank_row.addWidget(self.v_rank_name)
+        lay.addLayout(rank_row)
+        lay.addWidget(hsep())
 
         # Ligne MMR avec delta à côté
         mmr_row = QHBoxLayout()
@@ -294,6 +339,19 @@ class _CompactCard(_GlassCard):
         sv  = d.get("streak_val", 0)
         st  = d.get("streak_type", "")
 
+        # ── Rang ──────────────────────────────────────────────────────────
+        tier_id   = d.get("tier_id", 0)
+        rank_name = d.get("rank", "")
+        pm = get_rank_pixmap(tier_id, 30)
+        if pm:
+            self.v_rank_icon.setPixmap(pm)
+        else:
+            self.v_rank_icon.setText("?")
+            self.v_rank_icon.setStyleSheet(
+                f"color:{C_MUTE};font-size:9px;background:transparent;")
+        self.v_rank_name.setText(rank_name if rank_name else "Unranked")
+
+        # ── MMR + delta ───────────────────────────────────────────────────
         if mmr_mode == "delta":
             self.v_mmr.setText("")
             if chg:
@@ -397,6 +455,25 @@ class _BannerCard(QWidget):
             s.setStyleSheet("background:rgba(160,30,30,0.7);border:none;")
             return s
 
+        def rank_block():
+            w = QWidget()
+            w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            w.setStyleSheet("background:transparent;")
+            v = QVBoxLayout(w); v.setContentsMargins(0,0,0,0); v.setSpacing(2)
+            lbl_w = QLabel("RANG")
+            lbl_w.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl_w.setStyleSheet(
+                "color:rgba(180,180,180,0.55);font-size:8px;"
+                "letter-spacing:2.5px;font-weight:600;background:transparent;")
+            icon = QLabel()
+            icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            icon.setStyleSheet("background:transparent;")
+            v.addWidget(lbl_w); v.addWidget(icon)
+            self._vals["rank_icon"] = icon
+            return w
+
+        lay.addWidget(rank_block())
+        lay.addWidget(vsep())
         lay.addWidget(block("mmr",    "MMR",    "#00cfff", "#888888"))
         lay.addWidget(vsep())
         lay.addWidget(block("wins",   "WIN",    "#00e676"))
@@ -472,6 +549,18 @@ class _BannerCard(QWidget):
         self._winrate = (wins / total) if total > 0 else 0.5
         self.update()   # repaint
 
+        # Icône de rang
+        tier_id = d.get("tier_id", 0)
+        if "rank_icon" in self._vals:
+            pm = get_rank_pixmap(tier_id, 28)
+            if pm:
+                self._vals["rank_icon"].setPixmap(pm)
+                self._vals["rank_icon"].setText("")
+            else:
+                self._vals["rank_icon"].setPixmap(
+                    __import__("PyQt6.QtGui", fromlist=["QPixmap"]).QPixmap())
+                self._vals["rank_icon"].setText("?")
+
         # MMR
         mmr_txt = str(mmr) if mmr and mmr_mode != "delta" else ("--" if mmr_mode != "delta" else "")
         self._vals["mmr"].setText(mmr_txt)
@@ -504,10 +593,10 @@ class _BannerCard(QWidget):
 
 
 class _BannerClassicCard(_GlassCard):
-    """Ancienne bannière horizontale simple (380×62) — 5 blocs égaux."""
+    """Ancienne bannière horizontale simple (440×62) — 6 blocs égaux."""
     def __init__(self):
         super().__init__()
-        self.setFixedSize(380, 62)
+        self.setFixedSize(440, 62)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(16, 10, 16, 8)
         lay.setSpacing(0)
@@ -524,11 +613,26 @@ class _BannerClassicCard(_GlassCard):
             self._vals[key] = val
             return w
 
+        # Bloc rang : icône PNG au-dessus du label
+        def rank_block():
+            w = QWidget(); w.setStyleSheet("background:transparent;")
+            v = QVBoxLayout(w); v.setContentsMargins(0,0,0,0); v.setSpacing(1)
+            l = QLabel("RANG"); l.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            l.setStyleSheet(f"color:{C_MUTE};font-size:8px;letter-spacing:1px;background:transparent;")
+            icon = QLabel(); icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            icon.setFixedHeight(26)
+            icon.setStyleSheet("background:transparent;")
+            v.addWidget(l); v.addWidget(icon)
+            self._vals["rank_icon"] = icon
+            return w
+
         def vsep():
             s = QFrame(); s.setFrameShape(QFrame.Shape.VLine); s.setFixedWidth(1)
             s.setStyleSheet("background:rgba(255,255,255,0.12);border:none;")
             return s
 
+        lay.addWidget(rank_block())
+        lay.addWidget(vsep())
         lay.addWidget(block("mmr",    "MMR",    C_GOLD))
         lay.addWidget(vsep())
         lay.addWidget(block("delta",  "DELTA",  C_GREEN))
@@ -544,6 +648,18 @@ class _BannerClassicCard(_GlassCard):
         chg = d.get("mmr_change", 0)
         sv  = d.get("streak_val", 0)
         st  = d.get("streak_type", "")
+
+        # Icône de rang
+        tier_id = d.get("tier_id", 0)
+        pm = get_rank_pixmap(tier_id, 26)
+        if "rank_icon" in self._vals:
+            if pm:
+                self._vals["rank_icon"].setPixmap(pm)
+                self._vals["rank_icon"].setText("")
+            else:
+                self._vals["rank_icon"].setPixmap(
+                    __import__("PyQt6.QtGui", fromlist=["QPixmap"]).QPixmap())
+                self._vals["rank_icon"].setText("?")
 
         self._vals["mmr"].setText("" if mmr_mode == "delta" else (str(mmr) if mmr else "--"))
 
@@ -1853,10 +1969,93 @@ class _DragLayer(QWidget):
         self.dbl_clicked.emit()
 
 
+# ── Auto-updater GitHub ───────────────────────────────────────────────────────
+_GITHUB_API  = "https://api.github.com/repos/dataky/BakkyTrack/contents/"
+_GITHUB_RAW  = "https://raw.githubusercontent.com/dataky/BakkyTrack/main/"
+_UPDATE_DIRS = {
+    "overlays":  os.path.join(BASE_DIR, "overlays"),
+    "all rank":  os.path.join(BASE_DIR, "all rank"),
+    "themes":    os.path.join(BASE_DIR, "themes"),
+}
+
+def _github_auto_update(blocking=False):
+    """
+    Parcourt chaque dossier GitHub via l'API, compare le SHA Git local/distant,
+    et télécharge uniquement les fichiers nouveaux ou modifiés.
+    blocking=True : attend la fin (premier lancement sans fichiers locaux).
+    blocking=False : thread daemon — aucun impact sur le démarrage.
+    """
+    import urllib.request, urllib.error, json, hashlib, threading
+
+    def _git_sha1(data: bytes) -> str:
+        header = f"blob {len(data)}\0".encode()
+        return hashlib.sha1(header + data).hexdigest()
+
+    def _update_dir(remote_path: str, local_dir: str):
+        os.makedirs(local_dir, exist_ok=True)
+        url = _GITHUB_API + urllib.parse.quote(remote_path)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "BakkyTrack"})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                entries = json.loads(r.read())
+        except Exception as e:
+            print(f"[Updater] Impossible de lister {remote_path} : {e}")
+            return
+        for entry in entries:
+            if entry.get("type") != "file":
+                continue
+            name       = entry["name"]
+            remote_sha = entry["sha"]
+            raw_url    = _GITHUB_RAW + urllib.parse.quote(f"{remote_path}/{name}")
+            local_path = os.path.join(local_dir, name)
+            if os.path.exists(local_path):
+                with open(local_path, "rb") as f:
+                    if _git_sha1(f.read()) == remote_sha:
+                        continue
+            try:
+                req = urllib.request.Request(raw_url, headers={"User-Agent": "BakkyTrack"})
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    data = r.read()
+                with open(local_path, "wb") as f:
+                    f.write(data)
+                print(f"[Updater] ✓ {remote_path}/{name}")
+            except Exception as e:
+                print(f"[Updater] ✗ {remote_path}/{name} : {e}")
+
+    def _run():
+        for remote_path, local_dir in _UPDATE_DIRS.items():
+            _update_dir(remote_path, local_dir)
+        # logo.ico à la racine
+        _logo_local = os.path.join(BASE_DIR, "logo.ico")
+        _logo_url   = _GITHUB_RAW + "BakkyTrack/logo.ico"
+        try:
+            req = urllib.request.Request(_logo_url, headers={"User-Agent": "BakkyTrack"})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                data = r.read()
+            local_sha = _git_sha1(open(_logo_local, "rb").read()) if os.path.exists(_logo_local) else ""
+            if _git_sha1(data) != local_sha:
+                with open(_logo_local, "wb") as f:
+                    f.write(data)
+                print("[Updater] ✓ logo.ico")
+        except Exception as e:
+            print(f"[Updater] ✗ logo.ico : {e}")
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    if blocking:
+        t.join()
+
+
 def _load_overlay_plugins() -> dict:
     """Charge dynamiquement tous les plugins depuis le dossier overlays/.
     Retourne {name: {"widget": QWidget, "size": (w, h)}}
     """
+    # Premier lancement : overlays/ vide → téléchargement synchrone avant chargement
+    import glob as _glob
+    _overlay_folder = os.path.join(BASE_DIR, "overlays")
+    _first_launch = not _glob.glob(os.path.join(_overlay_folder, "*.py"))
+    _github_auto_update(blocking=_first_launch)
+
     import importlib.util, glob
     plugins = {}
     folder = os.path.join(BASE_DIR, "overlays")
@@ -2108,6 +2307,10 @@ class PlayersOverlayWindow(QMainWindow):
         self._plist.addWidget(e)
         self.adjustSize()
 
+    # ── Rate-limit tracker.network : 1 ouverture / 5 min par joueur ──────
+    _TRACKER_COOLDOWN_S = 300
+    _tracker_last_open: dict = {}
+
     def update_players(self, players):
         self._players = players
         self._clear_plist()
@@ -2134,8 +2337,10 @@ class PlayersOverlayWindow(QMainWindow):
                 f"letter-spacing:1px;background:transparent;")
             self._plist.addWidget(tl)
             for p in team_players:
-                name     = p.get("Name", "?")
-                platform = self._platform_from_id(p.get("PrimaryId", ""))
+                name       = p.get("Name", "?")
+                primary_id = p.get("PrimaryId", "")
+                platform   = self._platform_from_id(primary_id)
+                user_id    = self._id_from_primary_id(primary_id) or name
                 pb = QPushButton(name)
                 pb.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
                 pb.setStyleSheet(f"""
@@ -2146,7 +2351,7 @@ class PlayersOverlayWindow(QMainWindow):
                                        border-radius:3px;}}
                 """)
                 pb.clicked.connect(
-                    lambda _, n=name, pl=platform: self._open_profile(n, pl))
+                    lambda _, uid=user_id, pl=platform: self._open_profile(uid, pl))
                 self._plist.addWidget(pb)
 
         self.adjustSize()
@@ -2159,9 +2364,22 @@ class PlayersOverlayWindow(QMainWindow):
         if primary_id.startswith("Switch|"):  return "switch"
         return "epic"
 
-    def _open_profile(self, name, platform):
+    def _id_from_primary_id(self, primary_id):
+        """Extrait l'ID utilisateur depuis PrimaryId (ex: 'Steam|76561198...' → '76561198...')."""
+        if "|" in primary_id:
+            return primary_id.split("|", 1)[1]
+        return primary_id
+
+    def _open_profile(self, user_id, platform):
+        now = time.time()
+        last = self._tracker_last_open.get(user_id, 0)
+        remaining = self._TRACKER_COOLDOWN_S - (now - last)
+        if remaining > 0:
+            # Cooldown actif — on ignore le clic silencieusement
+            return
+        self._tracker_last_open[user_id] = now
         url = (f"https://rocketleague.tracker.network/rocket-league/profile"
-               f"/{platform}/{urllib.parse.quote(name)}/overview")
+               f"/{platform}/{urllib.parse.quote(user_id)}/overview")
         QDesktopServices.openUrl(QUrl(url))
 
 
