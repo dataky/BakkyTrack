@@ -286,10 +286,15 @@ class TrackerTab(QWidget):
         self._mmr_lbl   = lbl("--",  C_GOLD, 16, True)
         self._delta_lbl = lbl("",    C_GREEN, 10, True)
         self._rank_lbl  = lbl("",    C_MUTE,   9)
+        self._rank_icon_lbl = QLabel()
+        self._rank_icon_lbl.setFixedSize(28, 28)
+        self._rank_icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._rank_icon_lbl.setStyleSheet("background:transparent;")
         ref_btn = btn("↻", bg=C_BG3, size=12)
         ref_btn.setFixedSize(26, 26)
-        ref_btn.clicked.connect(self.app.fetch_mmr_async)
+        ref_btn.clicked.connect(lambda: self.app.fetch_mmr_async(force=True))
         row_mmr.addStretch()
+        row_mmr.addWidget(self._rank_icon_lbl); row_mmr.addSpacing(4)
         row_mmr.addWidget(self._rank_lbl); row_mmr.addWidget(self._mmr_lbl)
         row_mmr.addWidget(self._delta_lbl); row_mmr.addWidget(ref_btn)
         il.addLayout(row_mmr); il.addWidget(hsep())
@@ -420,7 +425,16 @@ class TrackerTab(QWidget):
         d   = self.app.all_mmr.get(self.app.selected_playlist, {})
         mmr = d.get("mmr")
         self._mmr_lbl.setText(str(mmr) if mmr else "--")
-        self._rank_lbl.setText(d.get("rank", ""))
+        rank_name = d.get("rank", "")
+        self._rank_lbl.setText(rank_name)
+        # Icône de rang dans la fenêtre principale
+        from overlay_widgets import get_rank_pixmap
+        tier_id = d.get("tier_id", 0)
+        pm = get_rank_pixmap(tier_id, 26)
+        if pm:
+            self._rank_icon_lbl.setPixmap(pm)
+        else:
+            self._rank_icon_lbl.clear()
         chg = d.get("mmr_change", 0)
         if chg != 0 and mmr:
             sign = "+" if chg > 0 else ""
@@ -528,6 +542,10 @@ class PlayersTab(QWidget):
 
         self._list_layout.addStretch()
 
+    # ── Rate-limit tracker.network : 1 ouverture / 5 min par joueur ──────
+    _TRACKER_COOLDOWN_S = 300
+    _tracker_last_open: dict = {}
+
     def _platform_from_id(self, primary_id):
         if primary_id.startswith("Steam|"):   return "steam"
         if primary_id.startswith("Epic|"):    return "epic"
@@ -536,12 +554,23 @@ class PlayersTab(QWidget):
         if primary_id.startswith("Switch|"):  return "switch"
         return "epic"
 
+    def _id_from_primary_id(self, primary_id):
+        """Extrait l'ID utilisateur depuis PrimaryId (ex: 'Steam|76561198...' → '76561198...')."""
+        if "|" in primary_id:
+            return primary_id.split("|", 1)[1]
+        return primary_id
+
     def _make_row(self, player, color):
         row = card(bg=C_BG2)
         row.setFixedHeight(54)
         rl = QHBoxLayout(row); rl.setContentsMargins(12, 8, 12, 8)
 
-        platform = self._platform_from_id(player.get("PrimaryId", ""))
+        primary_id = player.get("PrimaryId", "")
+        platform   = self._platform_from_id(primary_id)
+        raw_id     = self._id_from_primary_id(primary_id) or player.get("Name", "")
+        # tracker.network n'accepte pas l'UUID Epic brut — il faut le display name
+        user_id    = player.get("Name", raw_id) if platform == "epic" else raw_id
+
         plat_lbl = QLabel(platform.upper())
         plat_lbl.setStyleSheet(
             f"color:{C_BG};background:{C_MUTE};border-radius:3px;"
@@ -556,7 +585,7 @@ class PlayersTab(QWidget):
         open_btn = btn("→", bg=C_BG3, size=11)
         open_btn.setFixedSize(30, 30)
         open_btn.clicked.connect(
-            lambda _, n=player.get("Name",""), pl=platform: self._open_profile(n, pl))
+            lambda _, uid=user_id, pl=platform: self._open_profile(uid, pl))
 
         rl.addWidget(plat_lbl); rl.addSpacing(8)
         vl = QVBoxLayout(); vl.setSpacing(2); vl.setContentsMargins(0,0,0,0)
@@ -564,15 +593,26 @@ class PlayersTab(QWidget):
         rl.addLayout(vl); rl.addStretch(); rl.addWidget(open_btn)
         return row
 
-    def _open_profile(self, name, platform):
+    def _open_profile(self, user_id, platform):
+        now = time.time()
+        last = self._tracker_last_open.get(user_id, 0)
+        remaining = self._TRACKER_COOLDOWN_S - (now - last)
+        if remaining > 0:
+            # Cooldown actif — on ignore le clic silencieusement
+            return
+        self._tracker_last_open[user_id] = now
         url = (f"https://rocketleague.tracker.network/rocket-league/profile"
-               f"/{platform}/{urllib.parse.quote(name)}/overview")
+               f"/{platform}/{urllib.parse.quote(user_id)}/overview")
         QDesktopServices.openUrl(QUrl(url))
 
     def _open_all(self):
         for p in self._players:
-            pl = self._platform_from_id(p.get("PrimaryId", ""))
-            self._open_profile(p.get("Name", ""), pl)
+            primary_id = p.get("PrimaryId", "")
+            pl      = self._platform_from_id(primary_id)
+            raw_id  = self._id_from_primary_id(primary_id) or p.get("Name", "")
+            # tracker.network n'accepte pas l'UUID Epic brut — il faut le display name
+            user_id = p.get("Name", raw_id) if pl == "epic" else raw_id
+            self._open_profile(user_id, pl)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -607,38 +647,23 @@ class OverlayTab(QWidget):
         r_mode = QHBoxLayout()
         r_mode.addWidget(lbl("Type d'overlay", C_TEXT, 11))
         self._mode_combo = QComboBox()
-        self._mode_combo.addItems([
-            "compact  (224×172)",
-            "bannière RL  (440×68)",
-            "bannière classic  (380×62)",
-            "pill  (340×36)  — minimaliste",
-            "neon  (260×140)  — cyberpunk",
-            "sidebar  (108×260)  — vertical",
-            "gauge  (200×200)  — arc winrate",
-            "ticker  (640×26)  — défilant TV",
-            "glass  (300×110)  — glassmorphism",
-            "scoreboard  (380×88)  — Blue vs Orange",
-            "HUD  (320×130)  — militaire FPS",
-            "vivid  (400×78)  — gradient saturé",
-        ])
-        self._MODE_MAP = {
-            0: "compact",
-            1: "banner",
-            2: "banner_classic",
-            3: "pill",
-            4: "neon",
-            5: "sidebar",
-            6: "gauge",
-            7: "ticker",
-            8: "glassmorph",
-            9: "scoreboard",
-            10: "hud",
-            11: "vivid",
-        }
-        self._MODE_REVERSE = {v: k for k, v in self._MODE_MAP.items()}
+        
+        # Charger les overlays dynamiquement depuis overlay_widgets
+        from overlay_widgets import _load_overlay_plugins
+        self._available_modes = _load_overlay_plugins()  # {name: {widget, size}}
+        self._MODE_MAP = {}
+        self._MODE_REVERSE = {}
+        
+        for idx, (mode_name, mode_info) in enumerate(sorted(self._available_modes.items())):
+            size = mode_info.get("size", (0, 0))
+            display_text = f"{mode_name}  ({size[0]}×{size[1]})"
+            self._mode_combo.addItem(display_text)
+            self._MODE_MAP[idx] = mode_name
+            self._MODE_REVERSE[mode_name] = idx
+        
         self._mode_combo.setFixedWidth(200)
         self._mode_combo.currentIndexChanged.connect(
-            lambda i: self._set_mode(self._MODE_MAP[i]))
+            lambda i: self._set_mode(self._MODE_MAP.get(i, "compact")))
         r_mode.addStretch(); r_mode.addWidget(self._mode_combo)
         ml.addLayout(r_mode)
         root.addWidget(mode_card)
@@ -672,6 +697,9 @@ class OverlayTab(QWidget):
 
         self._active = False
         saved_mode = self.app.config.get("overlay_mode", "compact")
+        # Si le mode sauvegardé n'existe pas, utiliser le premier disponible
+        if saved_mode not in self._available_modes:
+            saved_mode = next(iter(self._available_modes), "compact")
         self._mode_combo.setCurrentIndex(self._MODE_REVERSE.get(saved_mode, 0))
         self._set_mode(saved_mode)
         self._set_mmr_mode(self.app.config.get("mmr_display_mode", "both"))
@@ -712,7 +740,8 @@ class OverlayTab(QWidget):
                 + ("" if active else f"QPushButton:hover{{color:{C_TEXT};}}"))
 
     def refresh_preview(self, stats):
-        self._preview.update_stats(stats, self.app.config.get("mmr_display_mode", "both"))
+        if hasattr(self._preview, "update_stats"):
+            self._preview.update_stats(stats, self.app.config.get("mmr_display_mode", "both"))
 
 
 
@@ -1211,12 +1240,12 @@ class SettingsTab(QWidget):
         al.addWidget(self._ini_status)
         root.addWidget(api_card)
 
-        # ── Tracker.network ───────────────────────────────────────────────
+        # ── tracker.gg API ────────────────────────────────────────────────
         tcard = card()
         tl = QVBoxLayout(tcard); tl.setContentsMargins(16,14,16,14); tl.setSpacing(6)
-        tl.addWidget(lbl("RLSTATS.NET (Scraping Chrome)", C_MUTE, 9))
-        tl.addWidget(lbl("✓ Scraping automatique via Selenium — pas d'API key nécessaire", C_GREEN, 9))
-        tl.addWidget(lbl("⚠  Google Chrome doit être installé sur la machine", C_ORG, 9))
+        tl.addWidget(lbl("SOURCE DES DONNÉES MMR & RANG", C_MUTE, 9))
+        tl.addWidget(lbl("✓ API tracker.gg — aucune dépendance externe requise", C_GREEN, 9))
+        tl.addWidget(lbl("⚠  Le pseudo doit correspondre exactement au profil tracker.gg", C_ORG, 9))
         root.addWidget(tcard)
 
         save_btn = btn("💾  Sauvegarder les paramètres", bg=C_BLUE, fg=C_TEXT, size=12)
@@ -1301,7 +1330,7 @@ class SettingsTab(QWidget):
         self.app.config.save()
         self._save_lbl.setText("✓  Sauvegardé !")
         QTimer.singleShot(2500, lambda: self._save_lbl.setText(""))
-        self.app.fetch_mmr_async()
+        self.app.fetch_mmr_async(force=True)
 
 
 def _sim_gamepad_button(btn_num):
@@ -1757,56 +1786,67 @@ class MatchService:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  SERVICE 2 — MMR  (Selenium scraping + retry + cache disque, zéro PyQt UI)
+#  SERVICE 2 — MMR  (tracker.gg API — HTTP pur, sans Selenium)
 # ─────────────────────────────────────────────────────────────────────────────
 class MMRService:
-    """Scrape le MMR via Selenium avec 3 tentatives et cache JSON local.
+    """Récupère le MMR et le rang via l'API tracker.gg.
 
-    N'importe aucun widget PyQt — communique uniquement via AppSignals.
+    Aucune dépendance externe (pas de Selenium, pas de Chrome).
+    Communique uniquement via AppSignals — zéro widget PyQt.
     """
 
     _CACHE_PATH  = os.path.join(BASE_DIR, "mmr_cache.json")
     _MAX_RETRIES = 3
-    _JS = r"""
-return (function() {
-    var out = { duel: null, doubles: null, standard: null, debug: [] };
-    var blockSkills = document.querySelector('div.block-skills');
-    if (!blockSkills) { out.debug.push('ERR: div.block-skills not found'); return out; }
-    var table = blockSkills.querySelector('table');
-    if (!table) { out.debug.push('ERR: table not found'); return out; }
-    var colMap = {};
-    Array.from(table.querySelectorAll('th')).forEach(function(th, i) {
-        var h = th.textContent.toLowerCase();
-        if      (h.indexOf('1v1')!=-1||h.indexOf('duel')!=-1)     colMap[i]='duel';
-        else if (h.indexOf('2v2')!=-1||h.indexOf('doubles')!=-1)  colMap[i]='doubles';
-        else if (h.indexOf('3v3')!=-1||h.indexOf('standard')!=-1) colMap[i]='standard';
-    });
-    Array.from(table.querySelectorAll('tr')).forEach(function(row) {
-        if (!row.querySelector('mmr')) return;
-        Array.from(row.querySelectorAll('td')).forEach(function(td, i) {
-            var key = colMap[i];
-            if (!key || out[key]!==null) return;
-            var m = td.innerHTML.match(/<\/mmr[^>]*>\s*(\d+)\s*<mmr/i);
-            if (m) {
-                var val = parseInt(m[1], 10);
-                if (val>=100 && val<=3000) { out[key]=val; }
-                else { out.debug.push(key+' hors plage: '+val); }
-            } else { out.debug.push(key+' no match'); }
-        });
-    });
-    return out;
-})();
-"""
+    _RETRY_WAIT  = 4   # secondes entre tentatives (×attempt pour backoff linéaire)
+
+    # Liste ordonnée des rangs — l'index = tier_id (0 = Unranked, 22 = SSL)
+    _RANKS = [
+        "Unranked",
+        "Bronze I", "Bronze II", "Bronze III",
+        "Silver I", "Silver II", "Silver III",
+        "Gold I", "Gold II", "Gold III",
+        "Platinum I", "Platinum II", "Platinum III",
+        "Diamond I", "Diamond II", "Diamond III",
+        "Champion I", "Champion II", "Champion III",
+        "Grand Champion I", "Grand Champion II", "Grand Champion III",
+        "Supersonic Legend",
+    ]
+
+    # playlistId tracker.gg → clé interne
+    _PLAYLIST_IDS = {10: "1v1", 11: "2v2", 13: "3v3"}
+
+    # Slug plateforme pour l'URL tracker.gg
+    _PLATFORM_SLUG = {
+        "epic":   "epic",
+        "steam":  "steam",
+        "ps4":    "psn",
+        "xbox":   "xbl",
+        "switch": "switch",
+    }
 
     def __init__(self, config: "Config", signals: "AppSignals"):
         self.config            = config
         self.signals           = signals
         self.selected_playlist = "3v3"
-        self.all_mmr = {k: {"mmr": None, "mmr_start": None, "mmr_change": 0, "rank": ""}
-                        for k in PLAYLIST_NAMES}
+        self.all_mmr = {
+            k: {"mmr": None, "mmr_start": None, "mmr_change": 0,
+                "rank": "", "tier_id": 0, "div_id": 0}
+            for k in PLAYLIST_NAMES
+        }
         self._load_cache()
 
-    # ── Cache ─────────────────────────────────────────────────────────────
+    # ── Helpers rang ──────────────────────────────────────────────────────
+    def _tier_id(self, rank_name: str) -> int:
+        try:
+            return self._RANKS.index(rank_name)
+        except ValueError:
+            return 0
+
+    def _div_id(self, div_name: str) -> int:
+        return {"Division I": 1, "Division II": 2,
+                "Division III": 3, "Division IV": 4}.get(div_name, 0)
+
+    # ── Cache disque ──────────────────────────────────────────────────────
     def _load_cache(self):
         try:
             with open(self._CACHE_PATH, encoding="utf-8") as f:
@@ -1815,28 +1855,52 @@ return (function() {
                 if k in data:
                     cached_mmr = data[k].get("mmr")
                     self.all_mmr[k]["mmr"]       = cached_mmr
-                    self.all_mmr[k]["mmr_start"] = cached_mmr  # delta repart de zéro
+                    self.all_mmr[k]["mmr_start"] = cached_mmr   # delta repart de zéro
                     self.all_mmr[k]["rank"]      = data[k].get("rank", "")
+                    self.all_mmr[k]["tier_id"]   = data[k].get("tier_id", 0)
+                    self.all_mmr[k]["div_id"]    = data[k].get("div_id", 0)
         except Exception:
-            pass  # premier lancement ou cache corrompu, pas grave
+            pass   # premier lancement ou cache corrompu, pas grave
 
     def _save_cache(self):
         try:
-            data = {k: {"mmr": v["mmr"], "rank": v.get("rank", "")}
-                    for k, v in self.all_mmr.items() if v["mmr"] is not None}
+            data = {
+                k: {"mmr": v["mmr"], "rank": v.get("rank", ""),
+                    "tier_id": v.get("tier_id", 0), "div_id": v.get("div_id", 0)}
+                for k, v in self.all_mmr.items() if v["mmr"] is not None
+            }
             with open(self._CACHE_PATH, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
         except Exception:
             pass
 
     def reset_deltas(self):
-        """Appelé en début de session : repart le delta depuis le MMR actuel."""
+        """Repart le delta depuis le MMR actuel (début de session)."""
         for d in self.all_mmr.values():
             d["mmr_start"] = d["mmr"]
             d["mmr_change"] = 0
 
-    # ── Fetch avec retry ──────────────────────────────────────────────────
-    def fetch_async(self, player_name=""):
+    # ── Fetch asynchrone ──────────────────────────────────────────────────
+    _FETCH_COOLDOWN_S = 300   # 5 minutes entre deux appels automatiques
+    _last_fetch_time  = 0.0   # partagé au niveau classe (une seule instance MMRService)
+
+    def fetch_async(self, player_name="", force=False):
+        """Lance le fetch MMR dans un thread.
+
+        force=True  → bypass le cooldown (bouton ↻ manuel, démarrage).
+        force=False → ignoré si la dernière requête date de moins de 5 min.
+        """
+        now = time.time()
+        if not force:
+            elapsed = now - MMRService._last_fetch_time
+            remaining = self._FETCH_COOLDOWN_S - elapsed
+            if remaining > 0:
+                mins = int(remaining // 60)
+                secs = int(remaining % 60)
+                self.signals.log_event.emit(
+                    f"[MMR] Cooldown actif — prochain fetch dans {mins}m{secs:02d}s")
+                return
+        MMRService._last_fetch_time = now
         threading.Thread(target=self._fetch, args=(player_name,), daemon=True).start()
 
     def _fetch(self, player_name=""):
@@ -1844,85 +1908,84 @@ return (function() {
         if not username:
             return
 
-        if not SELENIUM_AVAILABLE:
-            self.signals.mmr_error.emit("Selenium non disponible")
-            return
+        platform = self.config["platform"].lower()
+        slug     = self._PLATFORM_SLUG.get(platform, "epic")
 
-        platform = self.config["platform"]
-        _RLSTATS_SLUG = {
-            "epic":   "Epic",
-            "steam":  "Steam",
-            "ps4":    "PS4",
-            "xbox":   "XboxOne",
-            "switch": "Switch",
-        }
-        plat_cap = _RLSTATS_SLUG.get(platform, "Epic")
-        url      = f"https://rlstats.net/profile/{plat_cap}/{urllib.parse.quote(username)}"
+        # Steam : utiliser l'ID numérique tel quel ; autres : encoder le pseudo
+        if slug == "steam":
+            encoded = username
+        else:
+            encoded = urllib.parse.quote(username, safe="")
+
+        url = (f"https://api.tracker.gg/api/v2/rocket-league/standard/profile"
+               f"/{slug}/{encoded}")
 
         for attempt in range(1, self._MAX_RETRIES + 1):
-            driver = None
             try:
-                options = Options()
-                options.add_argument("--headless=new")
-                options.add_argument("--no-sandbox")
-                options.add_argument("--disable-dev-shm-usage")
-                options.add_argument("--disable-blink-features=AutomationControlled")
-                options.add_argument("--window-size=1280,900")
-                options.add_argument(
-                    "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-
-                if WEBDRIVER_MANAGER_AVAILABLE:
-                    driver = webdriver.Chrome(
-                        service=ChromeService(ChromeDriverManager().install()),
-                        options=options)
-                else:
-                    driver = webdriver.Chrome(options=options)
-
+                req = urllib.request.Request(url, headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"),
+                    "Accept":          "application/json",
+                    "Accept-Language": "en-US,en;q=0.9",
+                })
                 self.signals.log_event.emit(
-                    f"[MMR] Tentative {attempt}/{self._MAX_RETRIES} — {username} ({plat_cap})…")
-                driver.get(url)
-                time.sleep(6)
+                    f"[MMR] Tentative {attempt}/{self._MAX_RETRIES}"
+                    f" — {username} ({slug})…")
 
-                result = driver.execute_script(self._JS)
-                if result is None:
-                    raise RuntimeError("JS returned None — page bloquée ou structure inattendue")
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
 
-                for dbg in (result.get("debug") or []):
-                    self.signals.log_event.emit(f"[MMR-dbg] {dbg}")
+                if not isinstance(data.get("data"), dict):
+                    raise ValueError("tracker.gg : pas de données de profil")
 
-                mmr_map = {}
-                if result.get("duel"):     mmr_map["1v1"] = int(result["duel"])
-                if result.get("doubles"):  mmr_map["2v2"] = int(result["doubles"])
-                if result.get("standard"): mmr_map["3v3"] = int(result["standard"])
+                updated = False
+                for seg in data["data"].get("segments", []):
+                    if seg.get("type") != "playlist":
+                        continue
+                    pid    = seg.get("attributes", {}).get("playlistId")
+                    pl_key = self._PLAYLIST_IDS.get(pid)
+                    if pl_key is None:
+                        continue
 
-                if not mmr_map:
-                    raise RuntimeError(f"MMR introuvable pour {username}")
+                    s          = seg.get("stats", {})
+                    tier_name  = s.get("tier",     {}).get("metadata", {}).get("name", "Unranked")
+                    div_str    = s.get("division",  {}).get("metadata", {}).get("name", "")
+                    mmr_val    = s.get("rating",    {}).get("value", 0)
+                    tier_id    = self._tier_id(tier_name)
+                    div_id     = self._div_id(div_str)
+                    mmr        = int(mmr_val) if mmr_val else 0
 
-                for key, mmr in mmr_map.items():
-                    d = self.all_mmr[key]
+                    d = self.all_mmr[pl_key]
                     d["mmr_start"]  = mmr if d["mmr_start"] is None else d["mmr_start"]
                     d["mmr_change"] = mmr - d["mmr_start"]
                     d["mmr"]        = mmr
-                    self.signals.log_event.emit(f"[{key}] MMR: {mmr}")
+                    d["rank"]       = tier_name
+                    d["tier_id"]    = tier_id
+                    d["div_id"]     = div_id
+
+                    div_txt = f" {div_str}" if div_str else ""
+                    self.signals.log_event.emit(
+                        f"[{pl_key}] {tier_name}{div_txt} — MMR: {mmr}")
+                    updated = True
+
+                if not updated:
+                    raise ValueError("Aucune playlist ranked trouvée dans le profil")
 
                 self._save_cache()
                 self.signals.mmr_updated.emit()
-                self.signals.log_event.emit("✓ MMR mis à jour (rlstats.net)")
-                return  # succès — on sort de la boucle retry
+                self.signals.log_event.emit("✓ MMR & Ranks mis à jour (tracker.gg)")
+                return   # succès — on sort de la boucle retry
 
             except Exception as e:
                 self.signals.log_event.emit(
                     f"[MMR] Erreur tentative {attempt}: {str(e)[:60]}")
                 if attempt < self._MAX_RETRIES:
-                    time.sleep(4 * attempt)  # backoff linéaire
+                    time.sleep(self._RETRY_WAIT * attempt)
                 else:
                     self.signals.mmr_error.emit(
                         f"Échec après {self._MAX_RETRIES} tentatives: {str(e)[:55]}")
-            finally:
-                if driver:
-                    try: driver.quit()
-                    except: pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1993,7 +2056,7 @@ class MainApp(QMainWindow):
         self._start_http_server()
         self.match.start()
         self._start_hotkey_listener()
-        self.fetch_mmr_async()
+        self.fetch_mmr_async(force=True)
 
     # ── Property shims — rétrocompatibilité avec les onglets UI ──────────
     @property
@@ -2042,8 +2105,8 @@ class MainApp(QMainWindow):
                 f"border-radius:4px;padding:5px 12px;font-size:9px;font-weight:700;}}"
                 + ("" if active else f"QPushButton:hover{{color:{C_TEXT};}}"))
 
-    def fetch_mmr_async(self):
-        self.mmr.fetch_async(self.match.detected_player_name)
+    def fetch_mmr_async(self, force=False):
+        self.mmr.fetch_async(self.match.detected_player_name, force=force)
 
     def reconnect_statsapi(self):
         port_str = self.tracker_tab.get_port()
@@ -2146,6 +2209,8 @@ class MainApp(QMainWindow):
             "mmr":         d.get("mmr"),
             "mmr_change":  d.get("mmr_change", 0),
             "rank":        d.get("rank", ""),
+            "tier_id":     d.get("tier_id", 0),
+            "div_id":      d.get("div_id", 0),
         }
 
     def _push_overlay(self):
@@ -2309,60 +2374,9 @@ class MainApp(QMainWindow):
             try: self._sse_clients.remove(w)
             except ValueError: pass
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  AUTO-UPDATER — télécharge les fichiers manquants depuis GitHub au démarrage
-# ─────────────────────────────────────────────────────────────────────────────
-GITHUB_RAW = "https://raw.githubusercontent.com/dataky/BakkyTrack/main"
-
-# (chemin_local_relatif_à_BASE_DIR, url_raw_github)
-_REMOTE_FILES = [
-    # ── Overlays ──────────────────────────────────────────────────────────────
-    ("overlays/compact.py",       f"{GITHUB_RAW}/BakkyTrack/overlays/compact.py"),
-    ("overlays/banner.py",        f"{GITHUB_RAW}/BakkyTrack/overlays/banner.py"),
-    ("overlays/banner_classic.py",f"{GITHUB_RAW}/BakkyTrack/overlays/banner_classic.py"),
-    ("overlays/pill.py",          f"{GITHUB_RAW}/BakkyTrack/overlays/pill.py"),
-    ("overlays/neon.py",          f"{GITHUB_RAW}/BakkyTrack/overlays/neon.py"),
-    ("overlays/sidebar.py",       f"{GITHUB_RAW}/BakkyTrack/overlays/sidebar.py"),
-    ("overlays/gauge.py",         f"{GITHUB_RAW}/BakkyTrack/overlays/gauge.py"),
-    ("overlays/glassmorph.py",    f"{GITHUB_RAW}/BakkyTrack/overlays/glassmorph.py"),
-    ("overlays/scoreboard.py",    f"{GITHUB_RAW}/BakkyTrack/overlays/scoreboard.py"),
-    ("overlays/hud.py",           f"{GITHUB_RAW}/BakkyTrack/overlays/hud.py"),
-    ("overlays/vivid.py",         f"{GITHUB_RAW}/BakkyTrack/overlays/vivid.py"),
-    # ── Thèmes SVG ────────────────────────────────────────────────────────────
-    ("themes/rl_classic.svg",     f"{GITHUB_RAW}/themes/rl_classic.svg"),
-    ("themes/victory.svg",        f"{GITHUB_RAW}/themes/victory.svg"),
-    ("themes/defeat.svg",         f"{GITHUB_RAW}/themes/defeat.svg"),
-    ("themes/neon.svg",           f"{GITHUB_RAW}/themes/neon.svg"),
-    ("themes/dark_minimal.svg",   f"{GITHUB_RAW}/themes/dark_minimal.svg"),
-    # ── Icône ─────────────────────────────────────────────────────────────────
-    ("logo.ico",                  f"{GITHUB_RAW}/BakkyTrack/logo.ico"),
-]
-
-def _bootstrap():
-    """Télécharge les fichiers manquants depuis GitHub. Appelé avant l'UI."""
-    missing = [
-        (local, url) for local, url in _REMOTE_FILES
-        if not os.path.exists(os.path.join(BASE_DIR, local))
-    ]
-    if not missing:
-        return
-
-    print(f"[BakkyTrack] {len(missing)} fichier(s) manquant(s), téléchargement...")
-    for local, url in missing:
-        dest = os.path.join(BASE_DIR, local)
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        try:
-            with urllib.request.urlopen(url, timeout=10) as r:
-                with open(dest, "wb") as f:
-                    f.write(r.read())
-            print(f"  ✓ {local}")
-        except Exception as e:
-            print(f"  ✗ {local} — {e}")
-
 #  ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
-    _bootstrap()   # télécharge les fichiers manquants depuis GitHub
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setStyleSheet(APP_STYLE)
