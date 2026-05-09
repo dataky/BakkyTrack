@@ -5,7 +5,8 @@ BakkesMod v2 — Compatible StatsAPI
   Onglet 2 : Joueurs   (liste match en cours, clic → tracker.network)
   Onglet 3 : Overlay   (activation, compact/bannière, mode MMR)
   Onglet 4 : Auto      (skip replay, auto-queue, freeplay)
-  Onglet 5 : Paramètres
+  Onglet 5 : Sons      (activation de sons sur les événements du jeu)
+  Onglet 6 : Paramètres
 """
 
 import sys, json, time, threading, os, socket, urllib.parse, urllib.request, urllib.error
@@ -17,19 +18,9 @@ try:
 except ImportError:
     WEBSOCKET_AVAILABLE = False
 
-try:
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options
-    from selenium.webdriver.chrome.service import Service as ChromeService
-    try:
-        from webdriver_manager.chrome import ChromeDriverManager
-        WEBDRIVER_MANAGER_AVAILABLE = True
-    except Exception:
-        WEBDRIVER_MANAGER_AVAILABLE = False
-    SELENIUM_AVAILABLE = True
-except Exception:
-    SELENIUM_AVAILABLE = False
-    WEBDRIVER_MANAGER_AVAILABLE = False
+# Selenium/Chrome supprimé — inutilisé et forçait l'installation de Chrome
+SELENIUM_AVAILABLE = False
+WEBDRIVER_MANAGER_AVAILABLE = False
 
 try:
     import pyautogui
@@ -543,8 +534,17 @@ class PlayersTab(QWidget):
         self._list_layout.addStretch()
 
     # ── Rate-limit tracker.network : 1 ouverture / 5 min par joueur ──────
-    _TRACKER_COOLDOWN_S = 300
+    _TRACKER_COOLDOWN_S = 3
     _tracker_last_open: dict = {}
+
+    # Slugs d'URL tracker.network (différents des noms internes)
+    _URL_SLUG = {
+        "epic":   "epic",
+        "steam":  "steam",
+        "ps4":    "psn",
+        "xbox":   "xbl",
+        "switch": "switch",
+    }
 
     def _platform_from_id(self, primary_id):
         if primary_id.startswith("Steam|"):   return "steam"
@@ -555,9 +555,10 @@ class PlayersTab(QWidget):
         return "epic"
 
     def _id_from_primary_id(self, primary_id):
-        """Extrait l'ID utilisateur depuis PrimaryId (ex: 'Steam|76561198...' → '76561198...')."""
-        if "|" in primary_id:
-            return primary_id.split("|", 1)[1]
+        """Extrait l'ID utilisateur depuis PrimaryId (ex: 'Steam|76561198...|0' → '76561198...')."""
+        parts = primary_id.split("|")
+        if len(parts) >= 2:
+            return parts[1]
         return primary_id
 
     def _make_row(self, player, color):
@@ -568,8 +569,8 @@ class PlayersTab(QWidget):
         primary_id = player.get("PrimaryId", "")
         platform   = self._platform_from_id(primary_id)
         raw_id     = self._id_from_primary_id(primary_id) or player.get("Name", "")
-        # tracker.network n'accepte pas l'UUID Epic brut — il faut le display name
-        user_id    = player.get("Name", raw_id) if platform == "epic" else raw_id
+        # Steam utilise l'ID numérique ; toutes les autres plateformes utilisent le pseudo
+        user_id    = raw_id if platform == "steam" else player.get("Name", raw_id)
 
         plat_lbl = QLabel(platform.upper())
         plat_lbl.setStyleSheet(
@@ -601,8 +602,9 @@ class PlayersTab(QWidget):
             # Cooldown actif — on ignore le clic silencieusement
             return
         self._tracker_last_open[user_id] = now
+        slug = self._URL_SLUG.get(platform, platform)
         url = (f"https://rocketleague.tracker.network/rocket-league/profile"
-               f"/{platform}/{urllib.parse.quote(user_id)}/overview")
+               f"/{slug}/{urllib.parse.quote(user_id)}/overview")
         QDesktopServices.openUrl(QUrl(url))
 
     def _open_all(self):
@@ -610,8 +612,8 @@ class PlayersTab(QWidget):
             primary_id = p.get("PrimaryId", "")
             pl      = self._platform_from_id(primary_id)
             raw_id  = self._id_from_primary_id(primary_id) or p.get("Name", "")
-            # tracker.network n'accepte pas l'UUID Epic brut — il faut le display name
-            user_id = p.get("Name", raw_id) if pl == "epic" else raw_id
+            # Steam utilise l'ID numérique ; toutes les autres plateformes utilisent le pseudo
+            user_id = raw_id if pl == "steam" else p.get("Name", raw_id)
             self._open_profile(user_id, pl)
 
 
@@ -1080,7 +1082,7 @@ class SoundTab(QWidget):
         if not PYGAME_AVAILABLE:
             warn = card(bg="#2A0E00")
             wl = QVBoxLayout(warn); wl.setContentsMargins(16, 12, 16, 12)
-            wl.addWidget(lbl("⚠  pygame non installe", C_ORG, 11, True))
+            wl.addWidget(lbl("⚠  pygame non installé", C_ORG, 11, True))
             wl.addWidget(lbl("pip install pygame", C_TEXT, 10))
             root.addWidget(warn)
 
@@ -1158,7 +1160,7 @@ class SoundTab(QWidget):
             self.app.config.save()
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  ONGLET 5 — PARAMÈTRES
+#  ONGLET 6 — PARAMÈTRES
 # ─────────────────────────────────────────────────────────────────────────────
 class SettingsTab(QWidget):
     def __init__(self, app_ref):
@@ -1186,12 +1188,17 @@ class SettingsTab(QWidget):
         jl.addLayout(r1)
 
         r2 = QHBoxLayout()
-        r2.addWidget(lbl("Pseudo (exact)", C_TEXT, 11))
+        self._username_lbl = lbl("Pseudo (exact)", C_TEXT, 11)
+        r2.addWidget(self._username_lbl)
         self._username = QLineEdit(self.app.config["username"])
         self._username.setFixedWidth(180)
         r2.addStretch(); r2.addWidget(self._username)
         jl.addLayout(r2)
         root.addWidget(jcard)
+
+        # Met à jour le label/placeholder quand la plateforme change
+        self._platform.currentTextChanged.connect(self._on_platform_changed)
+        self._on_platform_changed(self._platform.currentText())
 
         # ── Overlay résultat ──────────────────────────────────────────────
         ocard = card()
@@ -1258,31 +1265,31 @@ class SettingsTab(QWidget):
         root.addWidget(self._save_lbl)
         root.addStretch()
 
-    def _open_rl_config(self):
-        paths = [
-            r"C:\Program Files\Epic Games\rocketleague\TAGame\Config",
-            r"C:\Program Files (x86)\Steam\steamapps\common\rocketleague\TAGame\Config",
-        ]
-        for p in paths:
-            if os.path.exists(p):
-                QDesktopServices.openUrl(QUrl.fromLocalFile(p))
-                return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.expanduser("~")))
+    def _on_platform_changed(self, platform):
+        if platform == "steam":
+            self._username_lbl.setText("Steam ID (64-bit)")
+            self._username.setPlaceholderText("ex: 76561198012345678")
+        else:
+            self._username_lbl.setText("Pseudo (exact)")
+            self._username.setPlaceholderText("ex: MonPseudo#1234")
 
-    def _auto_configure_ini(self):
-        """Écrit DefaultStatsAPI.ini automatiquement dans tous les dossiers RL trouvés."""
-        ini_content = "[TAGame.MatchStatsExporter_TA]\nPacketSendRate=30\nPort=49123\n"
-        search_roots = [
+    def _find_rl_config_dirs(self):
+        """Cherche tous les dossiers TAGame/Config possibles selon les variantes de noms RL."""
+        # Variantes possibles du nom du dossier RL
+        rl_variants = ["rocketleague", "Rocket League", "RocketLeague", "rocket-league", "Rocket-League"]
+        
+        # Dossiers racine à explorer
+        base_paths = [
             r"C:\Program Files\Epic Games",
             r"C:\Program Files (x86)\Epic Games",
             r"C:\Program Files (x86)\Steam\steamapps\common",
             r"C:\Program Files\Steam\steamapps\common",
         ]
-        # Aussi chercher via Steam libraryfolders.vdf
-        steam_dirs = []
+        
+        # Ajouter les chemins Steam personnalisés (via libraryfolders.vdf)
         vdf_paths = [
-            r"C:\Program Files (x86)\Steam\steamapps\libraryfolders.vdf",
-            r"C:\Program Files\Steam\steamapps\libraryfolders.vdf",
+            r"C:\Program Files (x86)\Steam\config\libraryfolders.vdf",
+            r"C:\Program Files\Steam\config\libraryfolders.vdf",
         ]
         for vdf in vdf_paths:
             if os.path.exists(vdf):
@@ -1293,26 +1300,42 @@ class SettingsTab(QWidget):
                             p = line.split('"')[-2]
                             candidate = os.path.join(p, "steamapps", "common")
                             if os.path.exists(candidate):
-                                steam_dirs.append(candidate)
+                                base_paths.append(candidate)
                 except Exception:
                     pass
-        search_roots += steam_dirs
-
+        
         found = []
-        for root in search_roots:
-            if not os.path.exists(root):
+        for base in base_paths:
+            if not os.path.exists(base):
                 continue
-            for folder in os.listdir(root):
-                cfg_dir = os.path.join(root, folder, "TAGame", "Config")
+            for variant in rl_variants:
+                cfg_dir = os.path.join(base, variant, "TAGame", "Config")
                 if os.path.exists(cfg_dir):
-                    ini_path = os.path.join(cfg_dir, "DefaultStatsAPI.ini")
-                    try:
-                        with open(ini_path, "w", encoding="utf-8") as f:
-                            f.write(ini_content)
-                        found.append(ini_path)
-                    except Exception as e:
-                        self._ini_status.setText(f"Erreur: {e}")
-                        return
+                    found.append(cfg_dir)
+        return found
+
+    def _open_rl_config(self):
+        dirs = self._find_rl_config_dirs()
+        if dirs:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(dirs[0]))
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.expanduser("~")))
+
+    def _auto_configure_ini(self):
+        """Écrit DefaultStatsAPI.ini automatiquement dans tous les dossiers RL trouvés."""
+        ini_content = "[TAGame.MatchStatsExporter_TA]\nPacketSendRate=30\nPort=49123\n"
+        
+        dirs = self._find_rl_config_dirs()
+        found = []
+        for cfg_dir in dirs:
+            ini_path = os.path.join(cfg_dir, "DefaultStatsAPI.ini")
+            try:
+                with open(ini_path, "w", encoding="utf-8") as f:
+                    f.write(ini_content)
+                found.append(ini_path)
+            except Exception as e:
+                self._ini_status.setText(f"Erreur: {e}")
+                return
 
         if found:
             self._ini_status.setStyleSheet(f"color:{C_GREEN};font-size:9px;")
@@ -1362,6 +1385,12 @@ def _sim_gamepad_button(btn_num):
 
 
 
+# ── Constantes bytes pour le parser JSON (évite chr() dans la boucle chaude) ──
+_B_OPEN      = ord('{')
+_B_CLOSE     = ord('}')
+_B_QUOTE     = ord('"')
+_B_BACKSLASH = ord('\\')
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  SERVICE 1 — MATCH  (état de jeu + parsing StatsAPI, zéro PyQt UI)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1389,8 +1418,10 @@ class MatchService:
         self._last_known_my_team  = None   # persiste entre MatchEnded et MatchDestroyed
         self.team_scores          = {}
         self._last_scores         = {}
-        self.current_players      = []
-        self.detected_player_name = ""
+        self.current_players         = []
+        self._current_player_names   = ()   # tuple pour comparaison rapide
+        self.detected_player_name    = ""
+        self.detected_player_primary_id = ""
         self._goal_counts         = {0: 0, 1: 0}
         self._prev_tgt_stats      = {}
         self._match_result_saved  = False  # True dès que MatchEnded a enregistré un résultat
@@ -1478,25 +1509,23 @@ class MatchService:
                     buf = buf[start:]
                     depth = end = 0; in_str = escaped = False
                     for i, bv in enumerate(buf):
-                        c = chr(bv)
-                        if escaped: escaped = False; continue
-                        if c == "\\" and in_str: escaped = True; continue
-                        if c == '"': in_str = not in_str; continue
-                        if in_str: continue
-                        if c == "{": depth += 1
-                        elif c == "}":
+                        # Comparaisons directes sur bytes — évite chr() à 30/s
+                        if escaped:          escaped = False; continue
+                        if bv == _B_BACKSLASH and in_str: escaped = True; continue
+                        if bv == _B_QUOTE:   in_str = not in_str; continue
+                        if in_str:           continue
+                        if bv == _B_OPEN:    depth += 1
+                        elif bv == _B_CLOSE:
                             depth -= 1
                             if depth == 0: end = i; break
                     if end == 0 and depth != 0: break
                     msg = buf[:end + 1]; buf = buf[end + 1:]
                     try:
-                        # Throttle UpdateState dans le log (peut arriver à 120/s) :
-                        # n'afficher qu'une fois par seconde pour éviter le gel de l'UI.
+                        # Détection UpdateState sur bytes bruts — évite decode inutile
                         _now = time.monotonic()
-                        _decoded = msg.decode(errors="replace")
-                        _is_update = _decoded.lstrip().startswith('{"Event": "UpdateState"') \
-                                     or '"UpdateState"' in _decoded[:60]
+                        _is_update = b'"UpdateState"' in msg[:60]
                         if not _is_update or (_now - self._last_update_log_t) >= 1.0:
+                            _decoded = msg.decode(errors="replace")
                             self.signals.log_event.emit(_decoded[:80])
                             if _is_update:
                                 self._last_update_log_t = _now
@@ -1545,9 +1574,9 @@ class MatchService:
             game    = inner.get("Game", {})
             players = inner.get("Players", [])
 
-            new_names = [p.get("Name") for p in players]
-            old_names = [p.get("Name") for p in self.current_players]
-            if new_names != old_names:
+            new_names = tuple(p.get("Name") for p in players)
+            if new_names != self._current_player_names:
+                self._current_player_names = new_names
                 self.current_players = players
                 self.signals.players_updated.emit(players)
 
@@ -1614,6 +1643,7 @@ class MatchService:
                         self.my_team = p.get("TeamNum")
                         self._last_known_my_team = self.my_team
                         self.detected_player_name = p.get("Name", "")
+                        self.detected_player_primary_id = p.get("PrimaryId", "")
                         self.signals.player_detected.emit(self.detected_player_name, self.my_team)
                         break
 
@@ -1668,7 +1698,8 @@ class MatchService:
             self.team_scores         = {}
             self._last_scores        = {}
             self._goal_counts        = {0: 0, 1: 0}
-            self.current_players     = []
+            self.current_players         = []
+            self._current_player_names   = ()
 
         elif event in ("MatchInitialized",):
             self._match_result_saved = False
@@ -1778,7 +1809,8 @@ class MatchService:
             self._match_result_saved  = False
             self._match_started       = False
             self._had_opponent        = False
-            self.current_players      = []
+            self.current_players         = []
+            self._current_player_names   = ()
             self.signals.players_updated.emit([])
 
         elif event in ("PodiumStart", "GoalReplayStart"):
@@ -1884,7 +1916,7 @@ class MMRService:
     _FETCH_COOLDOWN_S = 300   # 5 minutes entre deux appels automatiques
     _last_fetch_time  = 0.0   # partagé au niveau classe (une seule instance MMRService)
 
-    def fetch_async(self, player_name="", force=False):
+    def fetch_async(self, player_name="", player_primary_id="", force=False):
         """Lance le fetch MMR dans un thread.
 
         force=True  → bypass le cooldown (bouton ↻ manuel, démarrage).
@@ -1901,21 +1933,27 @@ class MMRService:
                     f"[MMR] Cooldown actif — prochain fetch dans {mins}m{secs:02d}s")
                 return
         MMRService._last_fetch_time = now
-        threading.Thread(target=self._fetch, args=(player_name,), daemon=True).start()
+        threading.Thread(target=self._fetch, args=(player_name, player_primary_id), daemon=True).start()
 
-    def _fetch(self, player_name=""):
-        username = self.config["username"] or player_name
-        if not username:
-            return
-
+    def _fetch(self, player_name="", player_primary_id=""):
         platform = self.config["platform"].lower()
         slug     = self._PLATFORM_SLUG.get(platform, "epic")
 
-        # Steam : utiliser l'ID numérique tel quel ; autres : encoder le pseudo
+        # Steam : utiliser le Steam ID extrait du PrimaryId détecté,
+        # sinon fallback sur le champ username (saisi manuellement)
         if slug == "steam":
+            if player_primary_id.startswith("Steam|"):
+                parts = player_primary_id.split("|")
+                username = parts[1] if len(parts) >= 2 else ""
+            else:
+                username = self.config["username"] or player_name
             encoded = username
         else:
+            username = self.config["username"] or player_name
             encoded = urllib.parse.quote(username, safe="")
+
+        if not username:
+            return
 
         url = (f"https://api.tracker.gg/api/v2/rocket-league/standard/profile"
                f"/{slug}/{encoded}")
@@ -1923,12 +1961,18 @@ class MMRService:
         for attempt in range(1, self._MAX_RETRIES + 1):
             try:
                 req = urllib.request.Request(url, headers={
-                    "User-Agent": (
+                    "User-Agent":      (
                         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                         "AppleWebKit/537.36 (KHTML, like Gecko) "
                         "Chrome/124.0.0.0 Safari/537.36"),
-                    "Accept":          "application/json",
+                    "Accept":          "application/json, text/plain, */*",
                     "Accept-Language": "en-US,en;q=0.9",
+                    "Referer":         "https://rocketleague.tracker.network/",
+                    "Origin":          "https://rocketleague.tracker.network",
+                    "Connection":      "keep-alive",
+                    "sec-fetch-site":  "same-site",
+                    "sec-fetch-mode":  "cors",
+                    "sec-fetch-dest":  "empty",
                 })
                 self.signals.log_event.emit(
                     f"[MMR] Tentative {attempt}/{self._MAX_RETRIES}"
@@ -2106,7 +2150,11 @@ class MainApp(QMainWindow):
                 + ("" if active else f"QPushButton:hover{{color:{C_TEXT};}}"))
 
     def fetch_mmr_async(self, force=False):
-        self.mmr.fetch_async(self.match.detected_player_name, force=force)
+        self.mmr.fetch_async(
+            self.match.detected_player_name,
+            self.match.detected_player_primary_id,
+            force=force
+        )
 
     def reconnect_statsapi(self):
         port_str = self.tracker_tab.get_port()
@@ -2265,11 +2313,39 @@ class MainApp(QMainWindow):
 
     # ── HTTP server ───────────────────────────────────────────────────────
     def closeEvent(self, event):
-        """Arrête le thread websocket avant que Qt détruise les objets C++."""
+        """Nettoyage complet avant fermeture."""
+        # 1. Sauvegarde automatique de la config
+        try:
+            self.config.save()
+        except Exception:
+            pass
+
+        # 2. Arrêt du timer overlay
+        try:
+            self._overlay_timer.stop()
+        except Exception:
+            pass
+
+        # 3. Arrêt de la connexion StatsAPI
         self.match.stop()
-        self.overlay_win.close()
-        self.players_overlay_win.close()
-        self.result_overlay.hide()
+
+        # 4. Fermeture propre de toutes les fenêtres overlay
+        for w in (self.overlay_win, self.players_overlay_win, self.result_overlay):
+            try:
+                w.close()
+            except Exception:
+                pass
+
+        # 5. Arrêt propre de pygame si actif
+        if PYGAME_AVAILABLE:
+            try:
+                import pygame as _pg
+                if _pg.mixer.get_init():
+                    _pg.mixer.quit()
+                _pg.quit()
+            except Exception:
+                pass
+
         super().closeEvent(event)
 
     # ── Répertoire des overlays externes ─────────────────────────────────────
@@ -2377,6 +2453,20 @@ class MainApp(QMainWindow):
 #  ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
 def main():
+    # ── Instance unique — empêche plusieurs lancements simultanés ────────
+    if sys.platform == "win32":
+        import ctypes as _ctypes
+        _mutex = _ctypes.windll.kernel32.CreateMutexW(None, False, "BakkyTrack_SingleInstance")
+        if _ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                "BakkyTrack est déjà en cours d'exécution.",
+                "BakkyTrack",
+                0x30  # MB_ICONWARNING
+            )
+            sys.exit(0)
+
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setStyleSheet(APP_STYLE)
@@ -2384,8 +2474,6 @@ def main():
     app.setFont(font)
 
     # ── Chargement du logo ───────────────────────────────────────────────
-    # Priorité 1 : fichier logo.* dans le même dossier que l exe
-    # Priorité 2 : icône embarquée dans le code (toujours présente)
     from PyQt6.QtGui import QPixmap
     icon = None
 
@@ -2398,7 +2486,6 @@ def main():
                 break
 
     if icon is None:
-        # Fallback : icône embarquée en base64
         import base64
         px = QPixmap()
         px.loadFromData(base64.b64decode(_DEFAULT_ICON_B64))
@@ -2408,10 +2495,28 @@ def main():
     if icon:
         app.setWindowIcon(icon)
 
+    # ── Splash screen ────────────────────────────────────────────────────
+    from PyQt6.QtWidgets import QSplashScreen
+    from PyQt6.QtCore import Qt as _Qt
+    splash_px = QPixmap(400, 120)
+    splash_px.fill(QColor(C_BG))
+    splash = QSplashScreen(splash_px, _Qt.WindowType.WindowStaysOnTopHint)
+    splash.showMessage(
+        "  Chargement de BakkyTrack…",
+        _Qt.AlignmentFlag.AlignBottom | _Qt.AlignmentFlag.AlignLeft,
+        QColor(C_MUTE)
+    )
+    splash.show()
+    app.processEvents()
+
     win = MainApp()
     if icon:
         win.setWindowIcon(icon)
+
+    splash.finish(win)   # ferme le splash dès que la fenêtre est prête
     win.show()
+    win.raise_()                 # amène au premier plan
+    win.activateWindow()         # donne le focus clavier
     sys.exit(app.exec())
 
 
