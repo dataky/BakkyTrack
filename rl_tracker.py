@@ -1301,7 +1301,7 @@ class AutomationTab(QWidget):
         sl.addWidget(self._skip_cb)
 
         sl.addLayout(_key_row("Touche de skip :", "skip_replay_key", "key:space"))
-        sl.addLayout(_delay_row("Délai avant skip (0 = immédiat) :", "skip_replay_delay", 0))
+        sl.addLayout(_delay_row("Délai avant skip (3.55 = immédiat) :", "skip_replay_delay", 0))
         sl.addWidget(lbl("Ajuste le délai si le skip est trop tôt ou trop tard.", C_MUTE, 8))
         root.addWidget(sr_card)
 
@@ -2936,7 +2936,7 @@ def main():
     win.show()
     win.raise_()                 # amène au premier plan
     win.activateWindow()         # donne le focus clavier
-    sys.exit(app.exec())
+    sys.exit(app.exec())    ,
 
 
 if __name__ == "__main__":
