@@ -110,6 +110,9 @@ DEFAULT_CONFIG = {
     # Overlay manette
     "controller_overlay_enabled":    False,
     "controller_overlay_mode":       "with_bg",   # "with_bg" | "transparent"
+    # Mode streamer
+    "streamer_mode":                 False,
+    "streamer_mute_audio":           True,
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -213,12 +216,15 @@ class Config:
         except Exception:
             pass
 
-    def save(self):
+    def save(self) -> bool:
+        """Sauvegarde la config sur disque. Retourne True si succès, False sinon."""
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(self._d, f, indent=2, ensure_ascii=False)
+            return True
         except Exception as e:
             print(f"[Config] save error: {e}")
+            return False
 
     def __getitem__(self, k):    return self._d[k]
     def __setitem__(self, k, v): self._d[k] = v
@@ -239,6 +245,7 @@ class AppSignals(QObject):
     # Signaux inter-services (MatchService → MainApp, sans couplage PyQt UI)
     trigger_sound   = pyqtSignal(str)          # event_key (ex: "goal_scored")
     press_key_sig   = pyqtSignal(str, float)   # key_str, delay_seconds
+    game_phase_changed = pyqtSignal(str)       # "lobby" | "ingame"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -414,76 +421,136 @@ _PLAT_TO_SLUG = {
 
 _INGAME_CACHE_TTL = 300   # secondes avant de re-fetcher
 
+# Verrou global pour espacer les fetches in-game et éviter le rate-limit tracker.gg
+_ingame_fetch_lock = threading.Lock()
+_ingame_fetch_last = 0.0
+_INGAME_FETCH_GAP  = 1.2   # secondes minimum entre deux fetches joueurs
+
 
 def _fetch_player_for_ingame(primary_id: str, display_name: str, cache: dict):
-    """Fetche le MMR d'un joueur en background et stocke dans cache[primary_id]."""
+    """Fetche le MMR d'un joueur en background et stocke dans cache[primary_id].
+
+    Utilise exactement la même méthode que MMRService._fetch :
+    - _SSL_CTX / _SSL_CTX_NOVERIFY importés depuis overlay_widgets (certifi si dispo)
+    - Même headers HTTP
+    - Même logique de retry (3 tentatives, backoff linéaire)
+    + Espacement global des requêtes pour éviter le rate-limit quand plusieurs
+      joueurs sont fetchés en parallèle.
+    """
+    global _ingame_fetch_last
+
+    # ── Résolution plateforme / identifiant ──────────────────────────────────
     parts = primary_id.split("|")
     if len(parts) < 2:
-        cache[primary_id] = {"status": "error", "playlists": {}}
+        cache[primary_id] = {"status": "error", "http_code": 0, "playlists": {}, "timestamp": time.time()}
         return
 
     plat_raw = parts[0]
     user_id  = parts[1]
     slug     = _PLAT_TO_SLUG.get(plat_raw, "epic")
+    # Steam : ID numérique 64-bit — pas d'encodage de pseudo nécessaire
+    # Autres : on cherche par display_name (même comportement que MMRService._fetch)
     target   = user_id if slug == "steam" else urllib.parse.quote(display_name, safe="")
 
     if not target:
-        cache[primary_id] = {"status": "error", "playlists": {}}
+        cache[primary_id] = {"status": "error", "http_code": 0, "playlists": {}, "timestamp": time.time()}
         return
+
+    # ── Espacement global : max 1 fetch / _INGAME_FETCH_GAP secondes ─────────
+    with _ingame_fetch_lock:
+        now  = time.time()
+        wait = _INGAME_FETCH_GAP - (now - _ingame_fetch_last)
+        if wait > 0:
+            time.sleep(wait)
+        _ingame_fetch_last = time.time()
 
     url = (f"https://api.tracker.gg/api/v2/rocket-league/standard/profile"
            f"/{slug}/{target}")
-    try:
-        req = urllib.request.Request(url, headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"),
-            "Accept":          "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer":         "https://rocketleague.tracker.network/",
-        })
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
 
-        if not isinstance(data.get("data"), dict):
-            raise ValueError("No profile data")
+    # Headers identiques à MMRService._fetch
+    _HEADERS = {
+        "User-Agent":      (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"),
+        "Accept":          "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer":         "https://rocketleague.tracker.network/",
+        "Origin":          "https://rocketleague.tracker.network",
+        "Connection":      "keep-alive",
+        "sec-fetch-site":  "same-site",
+        "sec-fetch-mode":  "cors",
+        "sec-fetch-dest":  "empty",
+    }
 
-        playlists = {}
-        for seg in data["data"].get("segments", []):
-            if seg.get("type") != "playlist":
-                continue
-            pid_val   = seg.get("attributes", {}).get("playlistId")
-            s         = seg.get("stats", {})
-            tier_name = s.get("tier",    {}).get("metadata", {}).get("name", "Unranked")
-            mmr_val   = s.get("rating",  {}).get("value", 0)
-            try:
-                tier_id = MMRService._RANKS.index(tier_name)
-            except (ValueError, AttributeError):
-                tier_id = 0
-            playlists[pid_val] = {
-                "mmr":       int(mmr_val) if mmr_val else 0,
-                "tier_name": tier_name,
-                "tier_id":   tier_id,
+    _MAX_ATTEMPTS  = MMRService._MAX_RETRIES   # même constante (3)
+    _RETRY_WAIT    = MMRService._RETRY_WAIT    # même backoff (2 s)
+
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            req = urllib.request.Request(url, headers=_HEADERS)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                raw = resp.read().decode("utf-8")
+            data = json.loads(raw)
+            if not isinstance(data.get("data"), dict):
+                raise ValueError("No profile data")
+
+            playlists = {}
+            for seg in data["data"].get("segments", []):
+                if seg.get("type") != "playlist":
+                    continue
+                pid_val   = seg.get("attributes", {}).get("playlistId")
+                s         = seg.get("stats", {})
+                tier_name = s.get("tier",   {}).get("metadata", {}).get("name", "Unranked")
+                mmr_val   = s.get("rating", {}).get("value", 0)
+                try:
+                    tier_id = MMRService._RANKS.index(tier_name)
+                except (ValueError, AttributeError):
+                    tier_id = 0
+                playlists[pid_val] = {
+                    "mmr":       int(mmr_val) if mmr_val else 0,
+                    "tier_name": tier_name,
+                    "tier_id":   tier_id,
+                }
+
+            cache[primary_id] = {
+                "status":    "ok",
+                "playlists": playlists,
+                "timestamp": time.time(),
             }
+            return   # succès
 
-        cache[primary_id] = {
-            "status":    "ok",
-            "playlists": playlists,
-            "timestamp": time.time(),
-        }
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and attempt < _MAX_ATTEMPTS:
+                # Rate-limit tracker.gg — même backoff que MMRService._fetch
+                time.sleep(_RETRY_WAIT * attempt)
+                continue
+            # 403 (profil privé) / 404 (introuvable) / autre → erreur définitive
+            old = cache.get(primary_id, {})
+            cache[primary_id] = {
+                "status":    "error",
+                "http_code": e.code,
+                "playlists": old.get("playlists", {}),
+                "timestamp": time.time(),
+            }
+            return
 
-    except Exception:
-        old = cache.get(primary_id, {})
-        cache[primary_id] = {
-            "status":    "error",
-            "playlists": old.get("playlists", {}),
-            "timestamp": time.time(),
-        }
+        except Exception as e:
+            # Erreur réseau / SSL / parsing — on retente comme MMRService._fetch
+            if attempt < _MAX_ATTEMPTS:
+                time.sleep(_RETRY_WAIT * attempt)
+                continue
+            old = cache.get(primary_id, {})
+            cache[primary_id] = {
+                "status":    "error",
+                "http_code": 0,
+                "playlists": old.get("playlists", {}),
+                "timestamp": time.time(),
+            }
 
 
 from overlay_widgets import *
-from overlay_widgets import _CompactCard, _key_to_vk, _VK_MAP, ControllerOverlay
+from overlay_widgets import _CompactCard, _key_to_vk, _VK_MAP, ControllerOverlay, StreamerModeBar
 
 class TrackerTab(QWidget):
     def __init__(self, app_ref):
@@ -795,12 +862,17 @@ class TrackerTab(QWidget):
 #  ONGLET 2 — JOUEURS EN MATCH
 # ─────────────────────────────────────────────────────────────────────────────
 class PlayersTab(QWidget):
+    _PLAYLIST_KEY_TO_ID = {"1v1": 10, "2v2": 11, "3v3": 13}
+
     def __init__(self, app_ref):
         super().__init__()
         self.app = app_ref
         self._players = []
         self._build()
         app_ref.signals.players_updated.connect(self._on_players)
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self._refresh_mmr_labels)
+        self._refresh_timer.start(1000)
 
     def _build(self):
         root = QVBoxLayout(self)
@@ -839,6 +911,17 @@ class PlayersTab(QWidget):
         empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._list_layout.addWidget(empty)
         self._list_layout.addStretch()
+
+    def _refresh_mmr_labels(self):
+        if not self._players:
+            return
+        cache = getattr(self.app, "_ingame_stats_cache", {})
+        has_pending = any(
+            cache.get(p.get("PrimaryId", ""), {}).get("status") in ("loading", None, "")
+            for p in self._players if p.get("PrimaryId")
+        )
+        if has_pending:
+            self._on_players(self._players)
 
     def _clear_list(self):
         while self._list_layout.count():
@@ -897,13 +980,12 @@ class PlayersTab(QWidget):
 
     def _make_row(self, player, color):
         row = card(bg=C_BG2)
-        row.setFixedHeight(54)
-        rl = QHBoxLayout(row); rl.setContentsMargins(12, 8, 12, 8)
+        row.setFixedHeight(58)
+        rl = QHBoxLayout(row); rl.setContentsMargins(12, 6, 12, 6)
 
         primary_id = player.get("PrimaryId", "")
         platform   = self._platform_from_id(primary_id)
         raw_id     = self._id_from_primary_id(primary_id) or player.get("Name", "")
-        # Steam utilise l'ID numérique ; toutes les autres plateformes utilisent le pseudo
         user_id    = raw_id if platform == "steam" else player.get("Name", raw_id)
 
         plat_lbl = QLabel(platform.upper())
@@ -912,6 +994,26 @@ class PlayersTab(QWidget):
             f"padding:2px 5px;font-size:7px;font-weight:700;border:none;")
 
         name_lbl = lbl(player.get("Name", "?"), color, 12, True)
+
+        cache   = getattr(self.app, "_ingame_stats_cache", {})
+        entry   = cache.get(primary_id, {})
+        status  = entry.get("status", "")
+        pl_key  = getattr(self.app, "selected_playlist", "3v3")
+        pid_int = self._PLAYLIST_KEY_TO_ID.get(pl_key, 13)
+        pl_data = entry.get("playlists", {}).get(pid_int, {})
+
+        if status == "loading":
+            mmr_text, mmr_color, mmr_bold = "⏳ …", C_MUTE, False
+        elif status == "ok" and pl_data:
+            tier_name = pl_data.get("tier_name", "Unranked")
+            mmr_val   = pl_data.get("mmr", 0)
+            mmr_text, mmr_color, mmr_bold = f"{tier_name}  {mmr_val}", C_GOLD, True
+        elif status == "error":
+            mmr_text, mmr_color, mmr_bold = "—", C_MUTE, False
+        else:
+            mmr_text, mmr_color, mmr_bold = "", C_MUTE, False
+
+        mmr_lbl   = lbl(mmr_text, mmr_color, 9, bold=mmr_bold)
         stats_lbl = lbl(
             f"⚽ {player.get('Goals',0)}   🅰 {player.get('Assists',0)}   🛡 {player.get('Saves',0)}",
             C_MUTE, 9)
@@ -922,8 +1024,11 @@ class PlayersTab(QWidget):
             lambda _, uid=user_id, pl=platform: self._open_profile(uid, pl))
 
         rl.addWidget(plat_lbl); rl.addSpacing(8)
-        vl = QVBoxLayout(); vl.setSpacing(2); vl.setContentsMargins(0,0,0,0)
-        vl.addWidget(name_lbl); vl.addWidget(stats_lbl)
+        vl = QVBoxLayout(); vl.setSpacing(1); vl.setContentsMargins(0, 0, 0, 0)
+        vl.addWidget(name_lbl)
+        br = QHBoxLayout(); br.setSpacing(8); br.setContentsMargins(0, 0, 0, 0)
+        br.addWidget(stats_lbl); br.addStretch(); br.addWidget(mmr_lbl)
+        vl.addLayout(br)
         rl.addLayout(vl); rl.addStretch(); rl.addWidget(open_btn)
         return row
 
@@ -1646,6 +1751,39 @@ class SettingsTab(QWidget):
         root.setContentsMargins(16, 20, 16, 16)
         root.setSpacing(12)
 
+        # ── Mode Streamer ──────────────────────────────────────────────────
+        sm_card = card()
+        sml = QVBoxLayout(sm_card); sml.setContentsMargins(16, 14, 16, 16); sml.setSpacing(10)
+        sml.addWidget(lbl("MODE STREAMER", C_MUTE, 9))
+        sml.addWidget(lbl(
+            "Active une barre noire en haut de l'écran pour cacher le popup\n"
+            "\"Partie Trouvée\" de Rocket League (anti stream-snipe).\n"
+            "Coupe également le son système pour ne pas alerter les viewers.",
+            C_TEXT, 9))
+
+        self._streamer_btn = btn(
+            "🎥  ACTIVER LE MODE STREAMER", bg=C_BG3, fg=C_TEXT, size=11)
+        self._streamer_btn.setFixedHeight(42)
+        self._streamer_btn.clicked.connect(self._toggle_streamer)
+        sml.addWidget(self._streamer_btn)
+
+        mute_row = QHBoxLayout()
+        mute_row.addWidget(lbl("Couper le son hors partie (recherche)", C_TEXT, 11))
+        self._streamer_mute_chk = QCheckBox()
+        self._streamer_mute_chk.setChecked(self.app.config.get("streamer_mute_audio", True))
+        self._streamer_mute_chk.stateChanged.connect(self._on_streamer_mute_changed)
+        mute_row.addStretch()
+        mute_row.addWidget(self._streamer_mute_chk)
+        sml.addLayout(mute_row)
+
+        self._streamer_hint = lbl("", C_MUTE, 9)
+        sml.addWidget(self._streamer_hint)
+        root.addWidget(sm_card)
+
+        # Initialise le style du bouton selon la config sauvegardée
+        self._streamer_active = self.app.config.get("streamer_mode", False)
+        self._update_streamer_btn()
+
         # ── Joueur ────────────────────────────────────────────────────────
         jcard = card()
         jl = QVBoxLayout(jcard); jl.setContentsMargins(16,14,16,16); jl.setSpacing(8)
@@ -1737,6 +1875,42 @@ class SettingsTab(QWidget):
         self._save_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         root.addWidget(self._save_lbl)
         root.addStretch()
+
+    def _on_streamer_mute_changed(self, state):
+        self.app.config["streamer_mute_audio"] = bool(state)
+        self.app.config.save()
+        self._update_streamer_btn()
+
+    def _toggle_streamer(self):
+        self._streamer_active = not self._streamer_active
+        self.app.config["streamer_mode"] = self._streamer_active
+        saved = self.app.config.save()
+        self.app._apply_streamer_mode(self._streamer_active)
+        self._update_streamer_btn()
+        if not saved:
+            # Avertissement visible si le fichier config est en lecture seule
+            # (ex: BakkyTrack installé dans Program Files)
+            self._streamer_hint.setText(
+                "⚠  Config non sauvegardée — vérifier les droits d'accès au dossier")
+            self._streamer_hint.setStyleSheet(
+                f"color:{C_ORG};font-size:9px;background:transparent;")
+
+    def _update_streamer_btn(self):
+        if self._streamer_active:
+            self._streamer_btn.setText("🎥  DÉSACTIVER LE MODE STREAMER")
+            self._streamer_btn.setStyleSheet(f"""
+                QPushButton{{background:{C_ORG};color:{C_TEXT};border:none;border-radius:4px;
+                             padding:5px 12px;font-size:11px;font-weight:700;}}
+                QPushButton:hover{{background:#e06000;}}""")
+            self._streamer_hint.setText("✓  Barre noire active — son coupé" if self.app.config.get("streamer_mute_audio", True) else "✓  Barre noire active")
+            self._streamer_hint.setStyleSheet(f"color:{C_GREEN};font-size:9px;background:transparent;")
+        else:
+            self._streamer_btn.setText("🎥  ACTIVER LE MODE STREAMER")
+            self._streamer_btn.setStyleSheet(f"""
+                QPushButton{{background:{C_BG3};color:{C_TEXT};border:none;border-radius:4px;
+                             padding:5px 12px;font-size:11px;font-weight:700;}}
+                QPushButton:hover{{background:{C_BG3}cc;}}""")
+            self._streamer_hint.setText("")
 
     def _on_platform_changed(self, platform):
         if platform == "steam":
@@ -2051,7 +2225,13 @@ class MatchService:
             # Players est plus fiable : en freeplay il n'y a que toi.
             teams_with_players = {p.get("TeamNum") for p in players}
             if 0 in teams_with_players and 1 in teams_with_players:
-                self._had_opponent = True
+                if not self._had_opponent:
+                    self._had_opponent = True
+                    # Première confirmation d'adversaire réel → désactiver la barre streamer.
+                    # On le fait ici (et non dans RoundStarted) pour ignorer le freeplay
+                    # qui émet aussi RoundStarted sans jamais avoir de TeamNum 1 dans Players.
+                    if self._match_started:
+                        self.signals.game_phase_changed.emit("ingame")
 
             if self.my_team is None:
                 platform    = self.config.get("platform", "epic").lower()
@@ -2146,13 +2326,19 @@ class MatchService:
             self._goal_counts        = {0: 0, 1: 0}
             self.current_players         = []
             self._current_player_names   = ()
+            # Barre streamer ON dès MatchCreated : cache le popup "Partie trouvée".
+            self.signals.game_phase_changed.emit("lobby")
 
         elif event in ("MatchInitialized",):
             self._match_result_saved = False
 
         elif event in ("RoundStarted", "CountdownBegin"):
             self._match_result_saved = False
-            self._match_started      = True   # le jeu a vraiment commencé
+            self._match_started      = True
+            # Si les deux équipes étaient déjà visibles avant le countdown → barre OFF.
+            # Freeplay : _had_opponent reste False → barre reste ON. ✓
+            if self._had_opponent:
+                self.signals.game_phase_changed.emit("ingame")
 
         # ── StatfeedEvent — demos, saves, epic saves ──────────────────────
         elif event == "StatfeedEvent":
@@ -2219,6 +2405,7 @@ class MatchService:
             self._last_scores   = {}
             self._goal_counts   = {0: 0, 1: 0}
             self._match_started = False
+            self.signals.game_phase_changed.emit("lobby")   # → barre streamer ON
 
         # ── MatchDestroyed ────────────────────────────────────────────────
         elif event == "MatchDestroyed":
@@ -2258,6 +2445,7 @@ class MatchService:
             self.current_players         = []
             self._current_player_names   = ()
             self.signals.players_updated.emit([])
+            self.signals.game_phase_changed.emit("lobby")   # → barre streamer ON
 
         elif event in ("PodiumStart", "GoalReplayStart"):
             pass
@@ -2424,8 +2612,15 @@ class MMRService:
                     f"[MMR] Tentative {attempt}/{self._MAX_RETRIES}"
                     f" — {username} ({slug})…")
 
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
+                # SSL : essaie d'abord avec vérification (certifi si dispo), puis sans
+                try:
+                    ssl_ctx = _SSL_CTX   # importé depuis overlay_widgets via *
+                    with urllib.request.urlopen(req, context=ssl_ctx, timeout=10) as resp:
+                        raw = resp.read().decode("utf-8")
+                except Exception:
+                    with urllib.request.urlopen(req, context=_SSL_CTX_NOVERIFY, timeout=10) as resp:
+                        raw = resp.read().decode("utf-8")
+                data = json.loads(raw)
 
                 if not isinstance(data.get("data"), dict):
                     raise ValueError("tracker.gg : pas de données de profil")
@@ -2505,6 +2700,8 @@ class MainApp(QMainWindow):
         )
         if self.config.get("controller_overlay_enabled", False):
             self.controller_overlay.show()
+        self.streamer_bar        = StreamerModeBar()
+        self._saved_system_vol   = None   # volume sauvegardé avant mute streamer
         self._ingame_stats_cache: dict = {}
         self._overlay_hold_active = False
 
@@ -2536,12 +2733,20 @@ class MainApp(QMainWindow):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         sound_scroll.setStyleSheet("background:transparent;border:none;")
 
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidget(self.settings_tab)
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        settings_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        settings_scroll.setStyleSheet("background:transparent;border:none;")
+
         tabs.addTab(scroll,              "📊  Stats")
         tabs.addTab(self.players_tab,    "👥  Match")
         tabs.addTab(self.overlay_tab,    "🖥  Overlay")
         tabs.addTab(self.auto_tab,       "⚡  Auto")
         tabs.addTab(sound_scroll,        "🔊  Sons")
-        tabs.addTab(self.settings_tab,   "⚙  Options")
+        tabs.addTab(settings_scroll,     "⚙  Options")
         tabs.setTabToolTip(
             0, "Connexion au serveur StatsAPI (même port que dans le plugin en jeu), "
                "MMR tracker.gg, playlists ranked, victoires / défaites et taux de victoire.")
@@ -2571,6 +2776,7 @@ class MainApp(QMainWindow):
         self.signals.players_updated.connect(self._on_players_for_ingame)
         self.signals.trigger_sound.connect(self._trigger_sound)
         self.signals.press_key_sig.connect(self._handle_press_key)
+        self.signals.game_phase_changed.connect(self._on_game_phase_changed)
 
         self._overlay_timer = QTimer(self)
         self._overlay_timer.timeout.connect(self._push_overlay)
@@ -2587,6 +2793,8 @@ class MainApp(QMainWindow):
         self.match.start()
         self._start_hotkey_listener()
         self.fetch_mmr_async(force=True)
+        # Mode streamer toujours désactivé au démarrage
+        self.config["streamer_mode"] = False
 
     # ── Property shims — rétrocompatibilité avec les onglets UI ──────────
     @property
@@ -2728,6 +2936,97 @@ class MainApp(QMainWindow):
         key = self.config.get("freeplay_key", "key:f")
         self.signals.log_event.emit(f"[Auto] Freeplay → {_key_display(key)}")
         threading.Thread(target=lambda: self._press_key(key), daemon=True).start()
+
+    # ── Mode Streamer ─────────────────────────────────────────────────────
+    def _on_game_phase_changed(self, phase: str):
+        """Réagit aux transitions de phase de jeu pour le mode streamer auto."""
+        if not self.config.get("streamer_mode", False):
+            return
+        if phase == "lobby":
+            # Fin de partie → on est en lobby/queue : activer la barre
+            self._apply_streamer_bar(True)
+        elif phase == "ingame":
+            # Partie commencée → désactiver la barre (on joue)
+            self._apply_streamer_bar(False)
+
+    def _apply_streamer_bar(self, show: bool):
+        """Affiche/cache la barre + mute/restore le son. Ne touche pas à la config."""
+        if show:
+            self.streamer_bar.show()
+            self._mute_system_audio()
+        else:
+            self.streamer_bar.hide()
+            self._restore_system_audio()
+
+    def _apply_streamer_mode(self, enabled: bool):
+        """Active ou désactive le mode streamer (barre noire + mute système)."""
+        if enabled:
+            self._apply_streamer_bar(True)
+            self.signals.log_event.emit("[Streamer] Mode activé — barre noire + mute son")
+        else:
+            self._apply_streamer_bar(False)
+            self.signals.log_event.emit("[Streamer] Mode désactivé — son restauré")
+
+    def _mute_system_audio(self):
+        """Mute uniquement la session audio de RocketLeague.exe (WASAPI via pycaw)."""
+        if sys.platform != "win32":
+            return
+        if not self.config.get("streamer_mute_audio", True):
+            return
+
+        # ── pycaw : cible la session audio RL spécifiquement ────────────────
+        try:
+            from pycaw.pycaw import AudioUtilities, ISimpleAudioVolume
+
+            RL_NAMES = {"rocketleague.exe", "rocket league.exe"}
+            sessions = AudioUtilities.GetAllSessions()
+            muted_sessions = []
+
+            for session in sessions:
+                try:
+                    if session.Process and session.Process.name().lower() in RL_NAMES:
+                        vol = session._ctl.QueryInterface(ISimpleAudioVolume)
+                        if not vol.GetMute():
+                            vol.SetMute(1, None)
+                            muted_sessions.append(vol)
+                except Exception:
+                    continue
+
+            if muted_sessions:
+                if self._saved_system_vol is None:
+                    self._saved_system_vol = ("pycaw_session", muted_sessions)
+                self.signals.log_event.emit(
+                    f"[Streamer] Son RL coupé ({len(muted_sessions)} session(s))")
+            else:
+                self.signals.log_event.emit(
+                    "[Streamer] RL non trouvé dans les sessions audio "
+                    "(jeu pas encore lancé ?)")
+            return
+
+        except ImportError:
+            self.signals.log_event.emit(
+                "[Streamer] pycaw absent — installe : pip install pycaw  "
+                "(nécessaire pour couper uniquement le son RL)")
+        except Exception as e:
+            self.signals.log_event.emit(f"[Streamer] Erreur mute session RL : {e}")
+
+    def _restore_system_audio(self):
+        """Restaure le son RL après le mode streamer."""
+        if sys.platform != "win32" or self._saved_system_vol is None:
+            return
+        try:
+            method = self._saved_system_vol[0]
+            if method == "pycaw_session":
+                _, sessions = self._saved_system_vol
+                for vol in sessions:
+                    try:
+                        vol.SetMute(0, None)
+                    except Exception:
+                        pass
+            self._saved_system_vol = None
+            self.signals.log_event.emit("[Streamer] Son RL restauré")
+        except Exception as e:
+            self.signals.log_event.emit(f"[Streamer] Impossible de restaurer le son: {e}")
 
     # ── Overlay stats ─────────────────────────────────────────────────────
     def _build_stats_dict(self):
@@ -2917,13 +3216,19 @@ class MainApp(QMainWindow):
         # 4. Fermeture propre de toutes les fenêtres overlay
         for w in (self.overlay_win, self.players_overlay_win,
                   self.result_overlay, self.ingame_mmr_overlay,
-                  self.controller_overlay):
+                  self.controller_overlay, self.streamer_bar):
             try:
                 w.close()
             except Exception:
                 pass
 
-        # 5. Arrêt propre de pygame si actif
+        # 5. Restauration du volume système si mode streamer actif
+        try:
+            self._restore_system_audio()
+        except Exception:
+            pass
+
+        # 6. Arrêt propre de pygame si actif
         if PYGAME_AVAILABLE:
             try:
                 import pygame as _pg
