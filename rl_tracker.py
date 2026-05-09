@@ -35,13 +35,8 @@ try:
 except ImportError:
     PYGAME_AVAILABLE = False
 
-try:
-    import vgamepad as vg
-    VGAMEPAD_AVAILABLE = True
-except ImportError:
-    VGAMEPAD_AVAILABLE = False
 
-from PyQt6.QtCore    import Qt, QTimer, pyqtSignal, QObject, QUrl, QPointF, QRectF, QByteArray
+from PyQt6.QtCore    import Qt, QTimer, pyqtSignal, QObject, QUrl, QPointF, QRectF, QByteArray, QThread
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QFrame, QTabWidget, QLineEdit, QComboBox,
@@ -106,6 +101,10 @@ DEFAULT_CONFIG = {
     "snd_file_save":          "",
     "result_overlay_enabled": True,
     "result_overlay_theme":   "auto",
+    # Touche hold-to-show pour l'overlay principal
+    "overlay_hotkey_type":           "key",   # "key" | "controller"
+    "overlay_hotkey_key":            "key:tab",
+    "overlay_hotkey_controller_btn": 0,
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -231,8 +230,294 @@ class AppSignals(QObject):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  XINPUT — Support manette Xbox  (même logique qu'InGameRank)
+# ─────────────────────────────────────────────────────────────────────────────
+if sys.platform == "win32":
+    import ctypes as _ctypes
+    from ctypes import wintypes as _wt
+
+    class _XINPUT_GAMEPAD(_ctypes.Structure):
+        _fields_ = [
+            ("wButtons",      _wt.WORD),
+            ("bLeftTrigger",  _wt.BYTE),
+            ("bRightTrigger", _wt.BYTE),
+            ("sThumbLX",      _wt.SHORT),
+            ("sThumbLY",      _wt.SHORT),
+            ("sThumbRX",      _wt.SHORT),
+            ("sThumbRY",      _wt.SHORT),
+        ]
+
+    class _XINPUT_STATE(_ctypes.Structure):
+        _fields_ = [
+            ("dwPacketNumber", _wt.DWORD),
+            ("Gamepad",        _XINPUT_GAMEPAD),
+        ]
+
+    _xinput = None
+    for _lib in ("xinput1_4", "xinput1_3", "xinput9_1_0"):
+        try:
+            _xinput = getattr(_ctypes.windll, _lib)
+            break
+        except OSError:
+            pass
+
+    def _get_xinput_state(user_index=0):
+        if not _xinput:
+            return None
+        state = _XINPUT_STATE()
+        return state if _xinput.XInputGetState(user_index, _ctypes.byref(state)) == 0 else None
+else:
+    def _get_xinput_state(user_index=0):
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  BIND WORKER — Détecte la prochaine touche clavier OU bouton manette
+# ─────────────────────────────────────────────────────────────────────────────
+class BindWorker(QThread):
+    """Lance dans un thread : attend la prochaine touche clavier ou bouton manette."""
+    finished_bind = pyqtSignal(str, bool, int)   # key_str, is_controller, btn_mask
+
+    def run(self):
+        time.sleep(0.4)   # évite de capturer la touche qui a ouvert le dialog
+
+        if sys.platform == "win32":
+            import ctypes
+            # Vide l'état courant
+            _get_xinput_state()
+
+        while True:
+            # ── Clavier (VK scan Windows) ──────────────────────────────────
+            if sys.platform == "win32":
+                import ctypes
+                for vk in list(_VK_MAP.values()):
+                    if ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000:
+                        # Retrouver le nom depuis la valeur
+                        for name, code in _VK_MAP.items():
+                            if code == vk:
+                                # Ignorer les boutons souris (prefix mouse:)
+                                if name.startswith("mouse:"):
+                                    continue
+                                self.finished_bind.emit(f"key:{name}", False, 0)
+                                return
+                        # Fallback : lettres A-Z / chiffres
+                        if 0x30 <= vk <= 0x39:
+                            self.finished_bind.emit(f"key:{chr(vk)}", False, 0)
+                            return
+                        if 0x41 <= vk <= 0x5A:
+                            self.finished_bind.emit(f"key:{chr(vk).lower()}", False, 0)
+                            return
+
+            # ── Manette XInput ────────────────────────────────────────────
+            xi = _get_xinput_state()
+            if xi and xi.Gamepad.wButtons != 0:
+                btn = xi.Gamepad.wButtons
+                # Attendre relâchement
+                while True:
+                    xi2 = _get_xinput_state()
+                    if not xi2 or xi2.Gamepad.wButtons == 0:
+                        break
+                    time.sleep(0.05)
+                self.finished_bind.emit("", True, btn)
+                return
+
+            time.sleep(0.02)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  OVERLAY BIND DIALOG — "Appuie sur une touche ou bouton manette"
+# ─────────────────────────────────────────────────────────────────────────────
+class OverlayBindDialog(QDialog):
+    """Fenêtre de capture : attend une touche clavier ou un bouton manette."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Configurer la touche overlay")
+        self.setFixedSize(360, 200)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setStyleSheet(
+            f"background:{C_BG2};border:2px solid {C_BLUE};border-radius:10px;")
+        self.captured_key   = None
+        self.is_controller  = False
+        self.controller_btn = 0
+        self._build()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(30, 28, 30, 22)
+        lay.setSpacing(16)
+
+        title = QLabel("CONFIGURER LA TOUCHE OVERLAY")
+        title.setStyleSheet(
+            f"color:{C_BLUE};font-size:10px;font-weight:700;"
+            f"letter-spacing:2px;background:transparent;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(title)
+
+        self._hint = QLabel(
+            "Appuie sur une touche clavier\n"
+            "ou maintiens un bouton manette…")
+        self._hint.setStyleSheet(
+            f"color:{C_TEXT};font-size:13px;background:transparent;")
+        self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._hint.setWordWrap(True)
+        lay.addWidget(self._hint)
+
+        row = QHBoxLayout()
+        none_btn = QPushButton("Désactiver")
+        none_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        none_btn.setStyleSheet(
+            f"QPushButton{{background:{C_BG3};color:{C_MUTE};border:none;"
+            f"border-radius:4px;padding:6px 14px;font-size:10px;font-weight:700;}}"
+            f"QPushButton:hover{{color:{C_TEXT};}}")
+        none_btn.clicked.connect(self._disable)
+        cancel_btn = QPushButton("Annuler")
+        cancel_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        cancel_btn.setStyleSheet(
+            f"QPushButton{{background:{C_BG3};color:{C_MUTE};border:none;"
+            f"border-radius:4px;padding:6px 14px;font-size:10px;font-weight:700;}}"
+            f"QPushButton:hover{{color:{C_TEXT};}}")
+        cancel_btn.clicked.connect(self.reject)
+        row.addWidget(none_btn)
+        row.addStretch()
+        row.addWidget(cancel_btn)
+        lay.addLayout(row)
+
+        # Lance le thread de capture
+        self._worker = BindWorker()
+        self._worker.finished_bind.connect(self._on_bind)
+        self._worker.start()
+
+    def _disable(self):
+        """Aucune touche — overlay désactivé."""
+        self.captured_key   = ""
+        self.is_controller  = False
+        self.controller_btn = 0
+        self._hint.setText("✓  Overlay désactivé (aucune touche)")
+        QTimer.singleShot(400, self.accept)
+
+    def _on_bind(self, key_str, is_ctrl, btn):
+        if is_ctrl:
+            self.is_controller  = True
+            self.controller_btn = btn
+            self.captured_key   = ""
+            self._hint.setText(f"✓  🎮  Bouton manette  0x{btn:04X}")
+        else:
+            self.is_controller  = False
+            self.controller_btn = 0
+            self.captured_key   = key_str
+            label = key_str[4:].upper() if key_str.startswith("key:") else key_str
+            self._hint.setText(f"✓  ⌨  {label}")
+        QTimer.singleShot(400, self.accept)
+
+    def closeEvent(self, event):
+        if self._worker.isRunning():
+            self._worker.terminate()
+        super().closeEvent(event)
+
+
+def _overlay_hotkey_display(cfg: "Config") -> str:
+    """Retourne un label lisible pour la touche overlay hold."""
+    htype = cfg.get("overlay_hotkey_type", "key")
+    if htype == "controller":
+        btn = cfg.get("overlay_hotkey_controller_btn", 0)
+        if btn == 0:
+            return "Désactivée"
+        return f"🎮  Bouton 0x{btn:04X}"
+    key = cfg.get("overlay_hotkey_key", "key:tab")
+    if not key:
+        return "Désactivée"
+    if key.startswith("key:"):
+        return f"⌨  {key[4:].upper()}"
+    return f"⌨  {key.upper()}"
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  FETCH MMR JOUEURS DU MATCH  (tracker.gg, tous les joueurs en jeu)
+# ─────────────────────────────────────────────────────────────────────────────
+_PLAT_TO_SLUG = {
+    "Epic":    "epic",
+    "Steam":   "steam",
+    "PS4":     "psn",
+    "XboxOne": "xbl",
+    "Switch":  "switch",
+}
+
+_INGAME_CACHE_TTL = 300   # secondes avant de re-fetcher
+
+
+def _fetch_player_for_ingame(primary_id: str, display_name: str, cache: dict):
+    """Fetche le MMR d'un joueur en background et stocke dans cache[primary_id]."""
+    parts = primary_id.split("|")
+    if len(parts) < 2:
+        cache[primary_id] = {"status": "error", "playlists": {}}
+        return
+
+    plat_raw = parts[0]
+    user_id  = parts[1]
+    slug     = _PLAT_TO_SLUG.get(plat_raw, "epic")
+    target   = user_id if slug == "steam" else urllib.parse.quote(display_name, safe="")
+
+    if not target:
+        cache[primary_id] = {"status": "error", "playlists": {}}
+        return
+
+    url = (f"https://api.tracker.gg/api/v2/rocket-league/standard/profile"
+           f"/{slug}/{target}")
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"),
+            "Accept":          "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer":         "https://rocketleague.tracker.network/",
+        })
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        if not isinstance(data.get("data"), dict):
+            raise ValueError("No profile data")
+
+        playlists = {}
+        for seg in data["data"].get("segments", []):
+            if seg.get("type") != "playlist":
+                continue
+            pid_val   = seg.get("attributes", {}).get("playlistId")
+            s         = seg.get("stats", {})
+            tier_name = s.get("tier",    {}).get("metadata", {}).get("name", "Unranked")
+            mmr_val   = s.get("rating",  {}).get("value", 0)
+            try:
+                tier_id = MMRService._RANKS.index(tier_name)
+            except (ValueError, AttributeError):
+                tier_id = 0
+            playlists[pid_val] = {
+                "mmr":       int(mmr_val) if mmr_val else 0,
+                "tier_name": tier_name,
+                "tier_id":   tier_id,
+            }
+
+        cache[primary_id] = {
+            "status":    "ok",
+            "playlists": playlists,
+            "timestamp": time.time(),
+        }
+
+    except Exception:
+        old = cache.get(primary_id, {})
+        cache[primary_id] = {
+            "status":    "error",
+            "playlists": old.get("playlists", {}),
+            "timestamp": time.time(),
+        }
+
+
 from overlay_widgets import *
-from overlay_widgets import _CompactCard, _key_to_vk
+from overlay_widgets import _CompactCard, _key_to_vk, _VK_MAP
 
 class TrackerTab(QWidget):
     def __init__(self, app_ref):
@@ -631,6 +916,32 @@ class OverlayTab(QWidget):
         root.setContentsMargins(16, 20, 16, 16)
         root.setSpacing(12)
 
+        # ── Touche hold-to-show ───────────────────────────────────────────
+        hk_card = card()
+        hkl = QVBoxLayout(hk_card); hkl.setContentsMargins(16,14,16,16); hkl.setSpacing(10)
+        hkl.addWidget(lbl("TOUCHE D'OVERLAY  (maintenir = afficher)", C_MUTE, 9))
+        hkl.addWidget(lbl(
+            "Maintiens cette touche en jeu pour afficher l'overlay.\n"
+            "Supporte clavier (défaut : Tab) et manette Xbox.",
+            C_TEXT, 9))
+
+        hk_row = QHBoxLayout()
+        self._hk_display = QLabel(_overlay_hotkey_display(self.app.config))
+        self._hk_display.setFixedWidth(170)
+        self._hk_display.setStyleSheet(
+            f"background:{C_BG3};color:{C_TEXT};border-radius:4px;"
+            f"padding:5px 9px;font-size:11px;border:1px solid {C_BG3};")
+        hk_bind_btn = QPushButton("🎯  Configurer")
+        hk_bind_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        hk_bind_btn.setStyleSheet(
+            f"QPushButton{{background:{C_BG3};color:{C_TEXT};border:none;border-radius:4px;"
+            f"padding:5px 10px;font-size:9px;font-weight:700;}}"
+            f"QPushButton:hover{{background:{C_BLUE};color:{C_TEXT};}}")
+        hk_bind_btn.clicked.connect(self._reconfigure_hotkey)
+        hk_row.addWidget(self._hk_display); hk_row.addWidget(hk_bind_btn); hk_row.addStretch()
+        hkl.addLayout(hk_row)
+        root.addWidget(hk_card)
+
         # ── Toggle ────────────────────────────────────────────────────────
         tog_card = card()
         tl = QVBoxLayout(tog_card); tl.setContentsMargins(16,16,16,16); tl.setSpacing(8)
@@ -706,6 +1017,20 @@ class OverlayTab(QWidget):
         self._set_mode(saved_mode)
         self._set_mmr_mode(self.app.config.get("mmr_display_mode", "both"))
 
+    def _reconfigure_hotkey(self):
+        dlg = OverlayBindDialog(self.window())
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            if dlg.is_controller:
+                self.app.config["overlay_hotkey_type"]           = "controller"
+                self.app.config["overlay_hotkey_controller_btn"] = dlg.controller_btn
+                self.app.config["overlay_hotkey_key"]            = ""
+            else:
+                self.app.config["overlay_hotkey_type"]           = "key"
+                self.app.config["overlay_hotkey_key"]            = dlg.captured_key or ""
+                self.app.config["overlay_hotkey_controller_btn"] = 0
+            self.app.config.save()
+            self._hk_display.setText(_overlay_hotkey_display(self.app.config))
+
     def _toggle(self):
         self._active = not self._active
         if self._active:
@@ -771,11 +1096,25 @@ _QT_KEY_MAP = {
     Qt.Key.Key_Home:    "home",  Qt.Key.Key_End:      "end",
     Qt.Key.Key_PageUp:  "pageup", Qt.Key.Key_PageDown: "pagedown",
     Qt.Key.Key_Insert:  "insert",
+    # Pavé numérique
+    Qt.Key.Key_0: "0", Qt.Key.Key_1: "1", Qt.Key.Key_2: "2",
+    Qt.Key.Key_3: "3", Qt.Key.Key_4: "4", Qt.Key.Key_5: "5",
+    Qt.Key.Key_6: "6", Qt.Key.Key_7: "7", Qt.Key.Key_8: "8",
+    Qt.Key.Key_9: "9",
+    Qt.Key.Key_division:   "num_div",   Qt.Key.Key_multiply: "num_mul",
+    Qt.Key.Key_Minus:      "num_minus", Qt.Key.Key_Plus:      "num_plus",
+    Qt.Key.Key_Period:     "num_dec",
+    # Touches système
+    Qt.Key.Key_Print:      "printscreen",
+    Qt.Key.Key_ScrollLock: "scrolllock",
+    Qt.Key.Key_Pause:      "pause",
+    Qt.Key.Key_NumLock:    "numlock",
+    Qt.Key.Key_CapsLock:   "capslock",
 }
 
 
 class KeyCaptureDialog(QDialog):
-    """Fenêtre de capture : attend un appui clavier ou manette."""
+    """Fenêtre de capture : attend un appui clavier ou clic souris."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -785,10 +1124,7 @@ class KeyCaptureDialog(QDialog):
         self.setStyleSheet(f"background:{C_BG2};border:2px solid {C_BLUE};border-radius:8px;")
         self.captured_key = None
         self._listening   = True
-        self._gamepad_timer = None
         self._build()
-        if PYGAME_AVAILABLE:
-            self._start_gamepad_poll()
 
     def _build(self):
         lay = QVBoxLayout(self)
@@ -801,53 +1137,30 @@ class KeyCaptureDialog(QDialog):
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(title)
 
-        self._hint = QLabel("Appuie sur une touche clavier\nou un bouton manette…")
+        self._hint = QLabel("Appuie sur une touche clavier\nou clique un bouton souris…")
         self._hint.setStyleSheet(f"color:{C_TEXT};font-size:12px;background:transparent;")
         self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._hint.setWordWrap(True)
         lay.addWidget(self._hint)
 
-        if PYGAME_AVAILABLE:
-            try:
-                pygame.init(); pygame.joystick.init()
-                count = pygame.joystick.get_count()
-            except Exception:
-                count = 0
-            if count == 0:
-                self._hint.setText("Appuie sur une touche clavier…\n(aucune manette détectée)")
-        else:
-            self._hint.setText("Appuie sur une touche clavier…\n(pip install pygame pour manette)")
-
         cancel_btn = btn("Annuler", bg=C_BG3, fg=C_MUTE, size=10)
         cancel_btn.clicked.connect(self.reject)
         lay.addWidget(cancel_btn)
 
-    def _start_gamepad_poll(self):
-        try:
-            pygame.init()
-            pygame.joystick.init()
-            self._joysticks = [pygame.joystick.Joystick(i)
-                               for i in range(pygame.joystick.get_count())]
-            for j in self._joysticks:
-                j.init()
-            self._gamepad_timer = QTimer(self)
-            self._gamepad_timer.timeout.connect(self._poll_gamepad)
-            self._gamepad_timer.start(16)
-        except Exception:
-            pass
-
-    def _poll_gamepad(self):
-        try:
-            pygame.event.pump()
-            for ev in pygame.event.get():
-                if ev.type == pygame.JOYBUTTONDOWN and self._listening:
-                    if self._gamepad_timer:
-                        self._gamepad_timer.stop()
-                    self._captured(f"joy_btn_{ev.button}",
-                                   f"🎮  Bouton manette {ev.button}")
-                    return
-        except Exception:
-            pass
+    def mousePressEvent(self, event):
+        """Capture les clics souris comme hotkey."""
+        if not self._listening:
+            return
+        btn_map = {
+            Qt.MouseButton.LeftButton:   ("mouse:left",  "🖱  Clic gauche"),
+            Qt.MouseButton.RightButton:  ("mouse:right", "🖱  Clic droit"),
+            Qt.MouseButton.MiddleButton: ("mouse:middle","🖱  Clic milieu"),
+            Qt.MouseButton.BackButton:   ("mouse:x1",    "🖱  Bouton retour"),
+            Qt.MouseButton.ForwardButton:("mouse:x2",    "🖱  Bouton avant"),
+        }
+        info = btn_map.get(event.button())
+        if info:
+            self._captured(*info)
 
     def keyPressEvent(self, event):
         if not self._listening:
@@ -860,8 +1173,6 @@ class KeyCaptureDialog(QDialog):
         if name is None and 0x20 <= key <= 0x7E:
             name = chr(key).lower()
         if name:
-            if self._gamepad_timer:
-                self._gamepad_timer.stop()
             self._captured(f"key:{name}", f"⌨  {name.upper()}")
 
     def _captured(self, key, label):
@@ -872,8 +1183,6 @@ class KeyCaptureDialog(QDialog):
 
     def closeEvent(self, event):
         self._listening = False
-        if self._gamepad_timer:
-            self._gamepad_timer.stop()
         super().closeEvent(event)
 
 
@@ -883,8 +1192,10 @@ def _key_display(key_str):
         return "—"
     if key_str.startswith("key:"):
         return f"⌨  {key_str[4:].upper()}"
-    if key_str.startswith("joy_btn_"):
-        return f"🎮  Btn {key_str.split('_')[2]}"
+    if key_str.startswith("mouse:"):
+        labels = {"left": "Clic gauche", "right": "Clic droit",
+                  "middle": "Clic milieu", "x1": "Btn retour", "x2": "Btn avant"}
+        return f"🖱  {labels.get(key_str[6:], key_str[6:].upper())}"
     return f"⌨  {key_str.upper()}"   # legacy
 
 
@@ -949,20 +1260,6 @@ class AutomationTab(QWidget):
             wl.addWidget(lbl("⚠  pyautogui non installé", C_ORG, 11, True))
             wl.addWidget(lbl("pip install pyautogui", C_TEXT, 10))
             root.addWidget(warn)
-
-        if PYGAME_AVAILABLE:
-            pygame.init(); pygame.joystick.init()
-            n = pygame.joystick.get_count()
-            joy_txt = f"🎮  {n} manette(s) détectée(s)" if n else "🎮  Aucune manette détectée"
-            joy_info = card(bg=C_BG2)
-            jl = QVBoxLayout(joy_info); jl.setContentsMargins(14,8,14,8)
-            jl.addWidget(lbl(joy_txt, C_GREEN if n else C_MUTE, 9))
-            root.addWidget(joy_info)
-        else:
-            warn2 = card(bg="#1A1400")
-            w2l = QVBoxLayout(warn2); w2l.setContentsMargins(16,10,16,10)
-            w2l.addWidget(lbl("🎮  Manette : pip install pygame  +  vgamepad", C_MUTE, 9))
-            root.addWidget(warn2)
 
         def _parse_delay(v, default):
             try:    return float(v.replace(",", "."))
@@ -1395,33 +1692,6 @@ class SettingsTab(QWidget):
         QTimer.singleShot(2500, lambda: self._save_lbl.setText(""))
         self.app.fetch_mmr_async(force=True)
 
-
-def _sim_gamepad_button(btn_num):
-    """Simule un bouton Xbox via vgamepad (ViGEm requis)."""
-    if not VGAMEPAD_AVAILABLE:
-        return
-    try:
-        _BTN_MAP = {
-            0: vg.XUSB_BUTTON.XUSB_GAMEPAD_A,
-            1: vg.XUSB_BUTTON.XUSB_GAMEPAD_B,
-            2: vg.XUSB_BUTTON.XUSB_GAMEPAD_X,
-            3: vg.XUSB_BUTTON.XUSB_GAMEPAD_Y,
-            4: vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_SHOULDER,
-            5: vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_SHOULDER,
-            6: vg.XUSB_BUTTON.XUSB_GAMEPAD_BACK,
-            7: vg.XUSB_BUTTON.XUSB_GAMEPAD_START,
-            8: vg.XUSB_BUTTON.XUSB_GAMEPAD_LEFT_THUMB,
-            9: vg.XUSB_BUTTON.XUSB_GAMEPAD_RIGHT_THUMB,
-        }
-        xbox_btn = _BTN_MAP.get(btn_num, vg.XUSB_BUTTON.XUSB_GAMEPAD_A)
-        gp = vg.VX360Gamepad()
-        gp.press_button(button=xbox_btn)
-        gp.update()
-        time.sleep(0.1)
-        gp.release_button(button=xbox_btn)
-        gp.update()
-    except Exception as e:
-        print(f"[vgamepad] {e}")
 
 
 
@@ -2093,6 +2363,9 @@ class MainApp(QMainWindow):
         self.overlay_win         = OverlayWindow()
         self.players_overlay_win = PlayersOverlayWindow()
         self.result_overlay      = ResultOverlay()
+        self.ingame_mmr_overlay  = InGameMMROverlay()
+        self._ingame_stats_cache: dict = {}
+        self._overlay_hold_active = False
 
         # ── Fond SVG — widget racine qui contient tout ────────────────────
         bg_theme = self.config.get("main_bg_theme", "dark_minimal")
@@ -2128,12 +2401,18 @@ class MainApp(QMainWindow):
             lambda name, _: setattr(self.match, "detected_player_name", name))
         self.signals.match_result.connect(self._handle_auto_match)
         self.signals.players_updated.connect(self.players_overlay_win.update_players)
+        self.signals.players_updated.connect(self._on_players_for_ingame)
         self.signals.trigger_sound.connect(self._trigger_sound)
         self.signals.press_key_sig.connect(self._handle_press_key)
 
         self._overlay_timer = QTimer(self)
         self._overlay_timer.timeout.connect(self._push_overlay)
         self._overlay_timer.start(REFRESH_MS)
+
+        # Timer de mise à jour de l'overlay in-game (joueurs du match)
+        self._ingame_timer = QTimer(self)
+        self._ingame_timer.timeout.connect(self._push_ingame_overlay)
+        self._ingame_timer.start(700)
 
         self._running = True
         self._last_sse_stats: dict = {}   # Cache pour éviter les SSE redondants
@@ -2260,14 +2539,13 @@ class MainApp(QMainWindow):
             if key_str.startswith("key:"):
                 if PYAUTOGUI_AVAILABLE:
                     pyautogui.press(key_str[4:])
-            elif key_str.startswith("joy_btn_"):
-                btn_num = int(key_str.split("_")[2])
-                if VGAMEPAD_AVAILABLE:
-                    _sim_gamepad_button(btn_num)
-                    self.signals.log_event.emit(f"[Auto] Manette bouton {btn_num}")
-                else:
-                    self.signals.log_event.emit(
-                        "[Auto] vgamepad requis — pip install vgamepad")
+            elif key_str.startswith("mouse:"):
+                btn_name = key_str[6:]
+                if PYAUTOGUI_AVAILABLE:
+                    btn_map = {"left": "left", "right": "right",
+                               "middle": "middle", "x1": "left", "x2": "right"}
+                    pyautogui.click(button=btn_map.get(btn_name, "left"))
+                    self.signals.log_event.emit(f"[Auto] Souris {btn_name}")
             else:
                 if PYAUTOGUI_AVAILABLE:
                     pyautogui.press(key_str)
@@ -2316,6 +2594,7 @@ class MainApp(QMainWindow):
     # ── Players overlay hotkey ────────────────────────────────────────────
     def _start_hotkey_listener(self):
         threading.Thread(target=self._hotkey_loop, daemon=True).start()
+        threading.Thread(target=self._overlay_hold_loop, daemon=True).start()
 
     def _hotkey_loop(self):
         if sys.platform != "win32":
@@ -2353,6 +2632,103 @@ class MainApp(QMainWindow):
         else:
             self.players_overlay_win.show()
 
+    # ── Joueurs du match → fetch MMR en background ────────────────────────
+    def _on_players_for_ingame(self, players: list):
+        """Déclenche le fetch tracker.gg pour chaque joueur nouveau du match."""
+        now = time.time()
+        for p in players:
+            pid  = p.get("PrimaryId", "")
+            name = p.get("Name", "")
+            if not pid:
+                continue
+            entry = self._ingame_stats_cache.get(pid)
+            # Ne re-fetch que si absent, en erreur, ou expiré
+            if entry and entry.get("status") == "ok":
+                age = now - entry.get("timestamp", 0)
+                if age < _INGAME_CACHE_TTL:
+                    continue
+            # Marque comme "en cours" pour éviter les doubles fetches
+            self._ingame_stats_cache[pid] = {
+                "status": "loading", "playlists": {}, "timestamp": now}
+            threading.Thread(
+                target=_fetch_player_for_ingame,
+                args=(pid, name, self._ingame_stats_cache),
+                daemon=True
+            ).start()
+
+    def _push_ingame_overlay(self):
+        """Rafraîchit l'overlay in-game avec les données à jour."""
+        if not self.ingame_mmr_overlay.isVisible():
+            return
+        self.ingame_mmr_overlay.set_data(
+            self.match.current_players,
+            self._ingame_stats_cache,
+            self.mmr.selected_playlist,
+        )
+
+    # ── Overlay hold-to-show loop ─────────────────────────────────────────
+    def _is_overlay_hotkey_pressed(self) -> bool:
+        """Retourne True si la touche overlay est actuellement maintenue."""
+        if sys.platform != "win32":
+            return False
+        import ctypes
+        htype = self.config.get("overlay_hotkey_type", "key")
+        if htype == "controller":
+            btn = self.config.get("overlay_hotkey_controller_btn", 0)
+            if btn == 0:
+                return False
+            xi = _get_xinput_state()
+            return bool(xi and (xi.Gamepad.wButtons & btn) == btn)
+        else:
+            key = self.config.get("overlay_hotkey_key", "key:tab")
+            if not key:
+                return False
+            vk = _key_to_vk(key)
+            if vk is None:
+                return False
+            return bool(ctypes.windll.user32.GetAsyncKeyState(vk) & 0x8000)
+
+    def _overlay_hold_loop(self):
+        """Thread : affiche overlay_win tant que la touche est maintenue."""
+        if sys.platform != "win32":
+            return
+        was_pressed   = False
+        cfg_refresh   = 0
+        while self.match._running:
+            time.sleep(0.04)
+
+            # Rafraîchissement config lent (~2 s)
+            cfg_refresh += 1
+            if cfg_refresh >= 50:
+                cfg_refresh = 0
+
+            pressed = self._is_overlay_hotkey_pressed()
+
+            if pressed and not was_pressed:
+                # Touche vient d'être appuyée → montrer overlay si pas déjà ouvert par le toggle
+                QTimer.singleShot(0, self._on_overlay_hold_start)
+            elif not pressed and was_pressed:
+                # Touche relâchée → cacher overlay (sauf si toggle UI l'a activé)
+                QTimer.singleShot(0, self._on_overlay_hold_end)
+
+            was_pressed = pressed
+
+    def _on_overlay_hold_start(self):
+        if not self.ingame_mmr_overlay.isVisible():
+            self._overlay_hold_active = True
+            # Injecter les données immédiatement à l'ouverture
+            self.ingame_mmr_overlay.set_data(
+                self.match.current_players,
+                self._ingame_stats_cache,
+                self.mmr.selected_playlist,
+            )
+            self.ingame_mmr_overlay.show()
+
+    def _on_overlay_hold_end(self):
+        if getattr(self, "_overlay_hold_active", False):
+            self._overlay_hold_active = False
+            self.ingame_mmr_overlay.hide()
+
     # ── HTTP server ───────────────────────────────────────────────────────
     def closeEvent(self, event):
         """Nettoyage complet avant fermeture."""
@@ -2372,7 +2748,8 @@ class MainApp(QMainWindow):
         self.match.stop()
 
         # 4. Fermeture propre de toutes les fenêtres overlay
-        for w in (self.overlay_win, self.players_overlay_win, self.result_overlay):
+        for w in (self.overlay_win, self.players_overlay_win,
+                  self.result_overlay, self.ingame_mmr_overlay):
             try:
                 w.close()
             except Exception:
