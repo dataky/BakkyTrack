@@ -2482,6 +2482,281 @@ class PlayersOverlayWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl(url))
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  IN-GAME MMR OVERLAY  (maintien Tab → MMR de tous les joueurs du match)
+# ─────────────────────────────────────────────────────────────────────────────
+class InGameMMROverlay(QMainWindow):
+    """Overlay affiché en maintenant Tab : montre le MMR de chaque joueur
+    pour la playlist actuellement sélectionnée (1v1 / 2v2 / 3v3)."""
+
+    _PLAYLIST_NAMES = {"1v1": "1V1", "2v2": "2V2", "3v3": "3V3"}
+    _PLAYLIST_IDS   = {"1v1": 10,    "2v2": 11,    "3v3": 13}
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint  |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool                 |
+            Qt.WindowType.BypassWindowManagerHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setFixedWidth(460)
+
+        self._players      = []
+        self._stats        = {}   # primary_id → {status, playlists}
+        self._playlist_key = "2v2"
+        self._drag_pos     = None
+
+        cont = QWidget()
+        cont.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setCentralWidget(cont)
+
+        outer = QVBoxLayout(cont)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        self._card = _GlassCard()
+        card_lay = QVBoxLayout(self._card)
+        card_lay.setContentsMargins(16, 12, 16, 14)
+        card_lay.setSpacing(8)
+
+        # ── Header ────────────────────────────────────────────────────────
+        hdr = QHBoxLayout()
+        self._title_lbl = QLabel("MMR  2V2  — EN JEU")
+        self._title_lbl.setStyleSheet(
+            f"color:{C_BLUE};font-size:9px;font-weight:700;"
+            f"letter-spacing:2px;background:transparent;")
+        self._status_lbl = QLabel("")
+        self._status_lbl.setStyleSheet(
+            f"color:{C_MUTE};font-size:8px;background:transparent;")
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(16, 16)
+        close_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        close_btn.setStyleSheet(
+            f"QPushButton{{background:transparent;color:{C_MUTE};border:none;font-size:9px;}}"
+            f"QPushButton:hover{{color:{C_TEXT};}}")
+        close_btn.clicked.connect(self.hide)
+        hdr.addWidget(self._title_lbl)
+        hdr.addSpacing(8)
+        hdr.addWidget(self._status_lbl)
+        hdr.addStretch()
+        hdr.addWidget(close_btn)
+        card_lay.addLayout(hdr)
+
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFixedHeight(1)
+        sep.setStyleSheet(f"background:{C_BG3};border:none;")
+        card_lay.addWidget(sep)
+
+        # ── Liste des joueurs ─────────────────────────────────────────────
+        self._players_w = QWidget()
+        self._players_w.setStyleSheet("background:transparent;")
+        self._plist = QVBoxLayout(self._players_w)
+        self._plist.setSpacing(2)
+        self._plist.setContentsMargins(0, 4, 0, 4)
+        card_lay.addWidget(self._players_w)
+
+        outer.addWidget(self._card)
+
+        # Drag via la carte
+        self._card.mousePressEvent  = self._mouse_press
+        self._card.mouseMoveEvent   = self._mouse_move
+
+        # Topmost
+        self._top_timer = QTimer(self)
+        self._top_timer.timeout.connect(self._enforce_topmost)
+        self._top_timer.start(2000)
+
+        # Refresh interne (toutes les 600 ms) pour mise à jour live des stats
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self._rebuild_rows)
+        self._refresh_timer.start(600)
+
+        self._rebuild_rows()
+
+    # ── Drag ──────────────────────────────────────────────────────────────
+    def _mouse_press(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+
+    def _mouse_move(self, e):
+        if e.buttons() & Qt.MouseButton.LeftButton and self._drag_pos:
+            self.move(e.globalPosition().toPoint() - self._drag_pos)
+
+    # ── Topmost ───────────────────────────────────────────────────────────
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._enforce_topmost()
+        # Centrer en haut de l'écran au premier affichage
+        screen = QApplication.primaryScreen().availableGeometry()
+        self.move(screen.center().x() - self.width() // 2,
+                  screen.top() + int(screen.height() * 0.08))
+
+    def _enforce_topmost(self):
+        if not self.isVisible():
+            return
+        try:
+            import ctypes
+            hwnd = int(self.winId())
+            ctypes.windll.user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003)
+        except Exception:
+            pass
+
+    # ── Données ───────────────────────────────────────────────────────────
+    def set_data(self, players: list, stats: dict, playlist_key: str):
+        """Appelée par MainApp pour injecter les joueurs et les stats."""
+        self._players      = players
+        self._stats        = stats
+        self._playlist_key = playlist_key
+        self._rebuild_rows()
+
+    def _pl_id(self) -> int:
+        return self._PLAYLIST_IDS.get(self._playlist_key, 11)
+
+    # ── Reconstruction de la liste ────────────────────────────────────────
+    def _clear(self):
+        while self._plist.count():
+            item = self._plist.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def _rebuild_rows(self):
+        self._clear()
+        pl_name = self._PLAYLIST_NAMES.get(self._playlist_key, "??")
+        self._title_lbl.setText(f"MMR  {pl_name}  — EN JEU")
+
+        if not self._players:
+            e = QLabel("En attente d'un match…")
+            e.setStyleSheet(
+                f"color:{C_MUTE};font-size:10px;background:transparent;")
+            e.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._plist.addWidget(e)
+            self.adjustSize()
+            return
+
+        pl_id          = self._pl_id()
+        blues          = [p for p in self._players if p.get("TeamNum") == 0]
+        oranges        = [p for p in self._players if p.get("TeamNum") == 1]
+        loading_count  = 0
+
+        for team_label, team_color, team_players in [
+            ("🔵  BLUE",   C_BLUE, blues),
+            ("🟠  ORANGE", C_ORG,  oranges),
+        ]:
+            if not team_players:
+                continue
+
+            # Séparateur équipe
+            tl = QLabel(team_label)
+            tl.setStyleSheet(
+                f"color:{team_color};font-size:8px;font-weight:700;"
+                f"letter-spacing:1.5px;background:transparent;")
+            self._plist.addWidget(tl)
+
+            for p in team_players:
+                pid    = p.get("PrimaryId", "")
+                name   = p.get("Name", "?")
+                entry  = self._stats.get(pid) if pid else None
+                status = entry.get("status", "loading") if entry else ("bot" if not pid else "loading")
+
+                row_w = QWidget()
+                row_w.setStyleSheet(
+                    f"background:rgba(255,255,255,0.03);border-radius:4px;")
+                row_lay = QHBoxLayout(row_w)
+                row_lay.setContentsMargins(8, 4, 8, 4)
+                row_lay.setSpacing(10)
+
+                # ── Icône de rang ────────────────────────────────────────
+                icon_lbl = QLabel()
+                icon_lbl.setFixedSize(32, 32)
+                icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                icon_lbl.setStyleSheet("background:transparent;")
+
+                if status == "ok":
+                    pl_stats = entry.get("playlists", {}).get(pl_id)
+                    if pl_stats:
+                        tier_id   = pl_stats.get("tier_id", 0)
+                        mmr_val   = pl_stats.get("mmr", 0)
+                        rank_name = pl_stats.get("tier_name", "Unranked")
+                        pm = get_rank_pixmap(tier_id, 30)
+                        if pm:
+                            icon_lbl.setPixmap(pm)
+                        else:
+                            icon_lbl.setText("?")
+                        mmr_str   = str(mmr_val) if mmr_val else "--"
+                        rank_str  = rank_name
+                        mmr_color = C_GOLD
+                    else:
+                        pm = get_rank_pixmap(0, 30)
+                        if pm: icon_lbl.setPixmap(pm)
+                        mmr_str   = "--"
+                        rank_str  = "Non classé"
+                        mmr_color = C_MUTE
+
+                elif status == "loading":
+                    loading_count += 1
+                    icon_lbl.setText("⋯")
+                    icon_lbl.setStyleSheet(
+                        f"color:{C_MUTE};font-size:16px;background:transparent;")
+                    mmr_str   = "Chargement…"
+                    rank_str  = ""
+                    mmr_color = C_MUTE
+
+                elif status == "error":
+                    icon_lbl.setText("✕")
+                    icon_lbl.setStyleSheet(
+                        f"color:{C_ORG};font-size:11px;background:transparent;")
+                    mmr_str   = "API Error"
+                    rank_str  = ""
+                    mmr_color = C_ORG
+
+                else:  # bot / pas de PID
+                    icon_lbl.setText("🤖")
+                    mmr_str   = "BOT"
+                    rank_str  = ""
+                    mmr_color = C_MUTE
+
+                row_lay.addWidget(icon_lbl)
+
+                # ── MMR ───────────────────────────────────────────────────
+                mmr_lbl = QLabel(mmr_str)
+                mmr_lbl.setFixedWidth(86)
+                mmr_lbl.setStyleSheet(
+                    f"color:{mmr_color};font-size:16px;font-weight:800;"
+                    f"background:transparent;")
+                row_lay.addWidget(mmr_lbl)
+
+                # ── Nom + rang ─────────────────────────────────────────────
+                info_w = QWidget()
+                info_w.setStyleSheet("background:transparent;")
+                info_lay = QVBoxLayout(info_w)
+                info_lay.setContentsMargins(0, 0, 0, 0)
+                info_lay.setSpacing(1)
+                name_lbl = QLabel(name)
+                name_lbl.setStyleSheet(
+                    f"color:{team_color};font-size:13px;font-weight:700;"
+                    f"background:transparent;")
+                info_lay.addWidget(name_lbl)
+                if rank_str:
+                    rl = QLabel(rank_str)
+                    rl.setStyleSheet(
+                        f"color:{C_MUTE};font-size:8px;background:transparent;")
+                    info_lay.addWidget(rl)
+                row_lay.addWidget(info_w, 1)
+
+                self._plist.addWidget(row_w)
+
+        # Statut global
+        if loading_count > 0:
+            self._status_lbl.setText(f"⟳ {loading_count} joueur(s)…")
+        else:
+            self._status_lbl.setText("✓")
+
+        self.adjustSize()
+
+
 # ── VK key map pour le hotkey listener ──────────────────────────────────────
 _VK_MAP = {
     "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73,
@@ -2492,12 +2767,25 @@ _VK_MAP = {
     "insert": 0x2D, "delete": 0x2E, "tab": 0x09,
     "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
     "backspace": 0x08,
+    # Pavé numérique
+    "num_div":   0x6F, "num_mul": 0x6A,
+    "num_minus": 0x6D, "num_plus": 0x6B, "num_dec": 0x6E,
+    "numlock": 0x90,
+    # Touches système
+    "printscreen": 0x2C, "scrolllock": 0x91, "pause": 0x13,
+    "capslock": 0x14,
+    # Souris
+    "mouse:left":   0x01, "mouse:right":  0x02,
+    "mouse:middle": 0x04, "mouse:x1":     0x05, "mouse:x2": 0x06,
 }
 
 def _key_to_vk(key_str):
     """Convertit une key string (ex: 'key:f7') en VK code Windows."""
     if not key_str:
         return None
+    # Souris — clé directe dans _VK_MAP
+    if key_str.startswith("mouse:"):
+        return _VK_MAP.get(key_str)
     if key_str.startswith("key:"):
         k = key_str[4:].lower()
         if k in _VK_MAP:
