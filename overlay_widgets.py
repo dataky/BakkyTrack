@@ -14,6 +14,23 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtSvg import QSvgRenderer
 
+# ── Contexte SSL — embarque certifi si disponible (fix PyInstaller) ───────────
+import ssl as _ssl
+try:
+    import certifi as _certifi
+    _SSL_CTX = _ssl.create_default_context(cafile=_certifi.where())
+except Exception:
+    try:
+        _SSL_CTX = _ssl.create_default_context()
+    except Exception:
+        _SSL_CTX = None   # fallback : vérification SSL désactivée
+
+# Contexte sans vérification SSL — utilisé si _SSL_CTX échoue
+_SSL_CTX_NOVERIFY = _ssl.create_default_context()
+_SSL_CTX_NOVERIFY.check_hostname = False
+_SSL_CTX_NOVERIFY.verify_mode    = _ssl.CERT_NONE
+
+
 # ── Couleurs (partagées avec rl_tracker.py) ──────────────────────────────────
 C_BG    = "#0A0C10"
 C_BG2   = "#12151C"
@@ -1287,12 +1304,35 @@ class _TickerCard(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(640, 26)
         self._text      = "MMR: --   |   0W  0L   |   STREAK: --   |   WIN RATE: --%"
-        self._text_prev = ""    # Détecte les changements pour invalider _fm_w
+        self._text_prev = ""
         self._offset    = 0
-        self._fm_w      = 0    # Largeur du texte — recalculée seulement quand _text change
+        self._fm_w      = 0
         self._timer     = QTimer(self)
         self._timer.timeout.connect(self._tick)
         self._timer.start(30)
+
+        # ── Objets de paint mis en cache — évite les re-créations à 30fps ──
+        self._brush_bg   = QBrush(QColor(8, 10, 18, 235))
+        self._font_badge = QFont()
+        self._font_badge.setPointSize(8)
+        self._font_badge.setWeight(QFont.Weight.Black)
+        self._font_badge.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 2)
+        self._font_text  = QFont()
+        self._font_text.setPointSize(9)
+        self._font_text.setWeight(QFont.Weight.Bold)
+        self._font_text.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.5)
+        self._pen_white  = QColor(255, 255, 255, 230)
+        self._pen_sep    = QPen(QColor(40, 80, 160, 140), 1)
+        self._col_cycle  = [
+            QColor("#00cfff"), QColor("#e8ecf4"),
+            QColor("#e8ecf4"), QColor("#aaaaaa"),
+        ]
+        self._col_sep_txt = QColor(60, 80, 120, 180)
+        self._col_bg_fade = QColor(8, 10, 18, 235)
+        self._col_bg_zero = QColor(8, 10, 18, 0)
+        self._col_blue    = QColor("#1A8CFF")
+        self._col_blue_dk = QColor("#0a3a6e")
+        self._col_rl_bar  = QColor("#1A8CFF")
 
     def _tick(self):
         self._offset -= self.SPEED_PX
@@ -1305,77 +1345,68 @@ class _TickerCard(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
 
-        # Fond dark avec bordure accent
+        # Fond dark (objet en cache)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(QColor(8, 10, 18, 235)))
+        p.setBrush(self._brush_bg)
         p.drawRoundedRect(0, 0, w, h, 3, 3)
 
-        # Accent bleu à gauche (badge "LIVE")
+        # Accent bleu badge "RL" (gradient recréé seulement si taille change)
         g = QLinearGradient(0, 0, 56, 0)
-        g.setColorAt(0.0, QColor("#1A8CFF"))
-        g.setColorAt(1.0, QColor("#0a3a6e"))
+        g.setColorAt(0.0, self._col_blue)
+        g.setColorAt(1.0, self._col_blue_dk)
         p.setBrush(QBrush(g))
         p.drawRoundedRect(0, 0, 56, h, 3, 3)
 
-        # Texte "RL" dans le badge
-        p.setPen(QColor(255, 255, 255, 230))
-        f_badge = QFont(); f_badge.setPointSize(8); f_badge.setWeight(QFont.Weight.Black)
-        f_badge.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 2)
-        p.setFont(f_badge)
+        # Texte "RL" (font en cache)
+        p.setPen(self._pen_white)
+        p.setFont(self._font_badge)
         p.drawText(QRectF(0, 0, 56, h), Qt.AlignmentFlag.AlignCenter, "RL")
 
-        # Séparateur vertical
-        p.setPen(QPen(QColor(40, 80, 160, 140), 1))
+        # Séparateur vertical (pen en cache)
+        p.setPen(self._pen_sep)
         p.drawLine(56, 0, 56, h)
 
-        # Zone de scroll — clipping à partir de x=64
+        # Zone de scroll
         p.setClipRect(QRectF(64, 0, w - 64, h))
-        f_text = QFont(); f_text.setPointSize(9); f_text.setWeight(QFont.Weight.Bold)
-        f_text.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 0.5)
-        p.setFont(f_text)
+        p.setFont(self._font_text)
 
         fm = p.fontMetrics()
-        # Recalcule la largeur seulement si le texte a changé — évite
-        # un horizontalAdvance() coûteux sur chaque frame (33fps).
         if self._text != self._text_prev:
             self._fm_w      = fm.horizontalAdvance(self._text)
             self._text_prev = self._text
         if self._offset == 0:
-            self._offset = w  # démarre hors écran
+            self._offset = w
 
-        # Colorer segments du texte (vert pour wins, rouge pour losses)
         x = self._offset + 64
         parts = self._text.split("   |   ")
-        colors = ["#00cfff", "#00e676", "#ff3d57" if parts[1].split("W")[0].strip() == "0" else "#00e676", "#aaaaaa", "#FFD700"]
-        col_cycle = ["#00cfff", "#e8ecf4", "#e8ecf4", "#aaaaaa"]
+        sep_w = fm.horizontalAdvance("   |   ")
         for i, part in enumerate(parts):
-            clr = col_cycle[i % len(col_cycle)]
-            p.setPen(QColor(clr))
+            p.setPen(self._col_cycle[i % len(self._col_cycle)])
             p.drawText(QPointF(x, h - 7), part)
             x += fm.horizontalAdvance(part)
             if i < len(parts) - 1:
-                p.setPen(QColor(60, 80, 120, 180))
+                p.setPen(self._col_sep_txt)
                 p.drawText(QPointF(x, h - 7), "   |   ")
-                x += fm.horizontalAdvance("   |   ")
+                x += sep_w
 
         p.setClipping(False)
 
-        # Dégradé de fondu sur les bords droite et gauche
-        fade_l = QLinearGradient(64, 0, 96, 0)
-        fade_l.setColorAt(0.0, QColor(8, 10, 18, 235))
-        fade_l.setColorAt(1.0, QColor(8, 10, 18, 0))
-        p.setBrush(QBrush(fade_l))
+        # Dégradés de fondu gauche/droite (objets en cache pour les couleurs)
         p.setPen(Qt.PenStyle.NoPen)
+        fade_l = QLinearGradient(64, 0, 96, 0)
+        fade_l.setColorAt(0.0, self._col_bg_fade)
+        fade_l.setColorAt(1.0, self._col_bg_zero)
+        p.setBrush(QBrush(fade_l))
         p.drawRect(QRectF(64, 0, 32, h))
 
         fade_r = QLinearGradient(w - 32, 0, w, 0)
-        fade_r.setColorAt(0.0, QColor(8, 10, 18, 0))
-        fade_r.setColorAt(1.0, QColor(8, 10, 18, 235))
+        fade_r.setColorAt(0.0, self._col_bg_zero)
+        fade_r.setColorAt(1.0, self._col_bg_fade)
         p.setBrush(QBrush(fade_r))
         p.drawRect(QRectF(w - 32, 0, 32, h))
 
         # Liseré bleu en bas
-        p.setBrush(QBrush(QColor("#1A8CFF")))
+        p.setBrush(QBrush(self._col_rl_bar))
         p.drawRect(QRectF(0, h - 2, w, 2))
 
         p.end()
@@ -1978,14 +2009,34 @@ _UPDATE_DIRS = {
     "themes":    os.path.join(BASE_DIR, "themes"),
 }
 
-def _github_auto_update(blocking=False):
+def _github_auto_update(blocking=False, progress_cb=None):
     """
     Parcourt chaque dossier GitHub via l'API, compare le SHA Git local/distant,
     et télécharge uniquement les fichiers nouveaux ou modifiés.
     blocking=True : attend la fin (premier lancement sans fichiers locaux).
     blocking=False : thread daemon — aucun impact sur le démarrage.
+    progress_cb : callable(msg: str) pour feedback dans l'UI (optionnel).
     """
     import urllib.request, urllib.error, json, hashlib, threading
+
+    def _log(msg):
+        print(msg)
+        if progress_cb:
+            try:
+                progress_cb(msg)
+            except Exception:
+                pass
+
+    def _urlopen(req, timeout=10):
+        """Essaie avec le contexte SSL normal, puis sans vérification si ça échoue."""
+        ctx = _SSL_CTX if _SSL_CTX is not None else _SSL_CTX_NOVERIFY
+        try:
+            return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+        except Exception as e:
+            if "SSL" in str(e) or "certificate" in str(e).lower():
+                _log(f"[Updater] SSL fallback (vérification désactivée) pour {req.full_url[:60]}")
+                return urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX_NOVERIFY)
+            raise
 
     def _git_sha1(data: bytes) -> str:
         header = f"blob {len(data)}\0".encode()
@@ -1993,14 +2044,29 @@ def _github_auto_update(blocking=False):
 
     def _update_dir(remote_path: str, local_dir: str):
         os.makedirs(local_dir, exist_ok=True)
+        
+        # Si le dossier existe et contient déjà des fichiers, skip la requête API
+        if os.path.isdir(local_dir) and any(os.path.isfile(os.path.join(local_dir, f)) for f in os.listdir(local_dir)):
+            _log(f"[Updater] {remote_path} — déjà présent localement, skip")
+            return
+        
         url = _GITHUB_API + urllib.parse.quote(remote_path)
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "BakkyTrack"})
-            with urllib.request.urlopen(req, timeout=8) as r:
+            with _urlopen(req, timeout=8) as r:
                 entries = json.loads(r.read())
-        except Exception as e:
-            print(f"[Updater] Impossible de lister {remote_path} : {e}")
+        except urllib.error.HTTPError as e:
+            if e.code == 403:
+                _log(f"[Updater] Limite GitHub atteinte pour {remote_path}. Réessai dans 60s ou utilisez un token GitHub.")
+            else:
+                _log(f"[Updater] Impossible de lister {remote_path} : {e}")
             return
+        except Exception as e:
+            _log(f"[Updater] Impossible de lister {remote_path} : {e}")
+            return
+        
+        time.sleep(0.5)  # Délai pour éviter le rate limiting
+        downloaded = 0
         for entry in entries:
             if entry.get("type") != "file":
                 continue
@@ -2009,41 +2075,62 @@ def _github_auto_update(blocking=False):
             raw_url    = _GITHUB_RAW + urllib.parse.quote(f"{remote_path}/{name}")
             local_path = os.path.join(local_dir, name)
             if os.path.exists(local_path):
-                with open(local_path, "rb") as f:
-                    if _git_sha1(f.read()) == remote_sha:
-                        continue
+                try:
+                    with open(local_path, "rb") as f:
+                        if _git_sha1(f.read()) == remote_sha:
+                            continue
+                except Exception:
+                    pass
             try:
+                time.sleep(0.3)  # Délai entre les téléchargements
                 req = urllib.request.Request(raw_url, headers={"User-Agent": "BakkyTrack"})
-                with urllib.request.urlopen(req, timeout=10) as r:
+                with _urlopen(req, timeout=10) as r:
                     data = r.read()
                 with open(local_path, "wb") as f:
                     f.write(data)
-                print(f"[Updater] ✓ {remote_path}/{name}")
+                downloaded += 1
+                _log(f"[Updater] ✓ {remote_path}/{name}")
+            except urllib.error.HTTPError as e:
+                if e.code == 403:
+                    _log(f"[Updater] ✗ {remote_path}/{name} : Limite GitHub (HTTP 403)")
+                else:
+                    _log(f"[Updater] ✗ {remote_path}/{name} : {e}")
             except Exception as e:
-                print(f"[Updater] ✗ {remote_path}/{name} : {e}")
+                _log(f"[Updater] ✗ {remote_path}/{name} : {e}")
+        if downloaded == 0:
+            _log(f"[Updater] {remote_path} — déjà à jour")
 
     def _run():
+        _log("[Updater] Vérification des mises à jour GitHub…")
         for remote_path, local_dir in _UPDATE_DIRS.items():
             _update_dir(remote_path, local_dir)
         # logo.ico à la racine
         _logo_local = os.path.join(BASE_DIR, "logo.ico")
+        if os.path.exists(_logo_local):
+            _log("[Updater] logo.ico — déjà présent, skip")
+            return
         _logo_url   = _GITHUB_RAW + "BakkyTrack/logo.ico"
         try:
+            time.sleep(0.5)
             req = urllib.request.Request(_logo_url, headers={"User-Agent": "BakkyTrack"})
-            with urllib.request.urlopen(req, timeout=8) as r:
+            with _urlopen(req, timeout=8) as r:
                 data = r.read()
-            local_sha = _git_sha1(open(_logo_local, "rb").read()) if os.path.exists(_logo_local) else ""
-            if _git_sha1(data) != local_sha:
-                with open(_logo_local, "wb") as f:
-                    f.write(data)
-                print("[Updater] ✓ logo.ico")
+            with open(_logo_local, "wb") as f:
+                f.write(data)
+            _log("[Updater] ✓ logo.ico")
+        except urllib.error.HTTPError as e:
+            if e.code == 403:
+                _log(f"[Updater] ✗ logo.ico : Limite GitHub (HTTP 403)")
+            else:
+                _log(f"[Updater] ✗ logo.ico : {e}")
         except Exception as e:
-            print(f"[Updater] ✗ logo.ico : {e}")
+            _log(f"[Updater] ✗ logo.ico : {e}")
+        _log("[Updater] ✓ Terminé")
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     if blocking:
-        t.join()
+        t.join(timeout=30)   # timeout de sécurité : max 30 secondes en mode bloquant
 
 
 def _load_overlay_plugins() -> dict:
@@ -2054,7 +2141,7 @@ def _load_overlay_plugins() -> dict:
     import glob as _glob
     _overlay_folder = os.path.join(BASE_DIR, "overlays")
     _first_launch = not _glob.glob(os.path.join(_overlay_folder, "*.py"))
-    _github_auto_update(blocking=_first_launch)
+    _github_auto_update(blocking=False)  # toujours en background — ne bloque plus le démarrage
 
     import importlib.util, glob
     plugins = {}
@@ -2308,8 +2395,17 @@ class PlayersOverlayWindow(QMainWindow):
         self.adjustSize()
 
     # ── Rate-limit tracker.network : 1 ouverture / 5 min par joueur ──────
-    _TRACKER_COOLDOWN_S = 300
+    _TRACKER_COOLDOWN_S = 3
     _tracker_last_open: dict = {}
+
+    # Slugs d'URL tracker.network
+    _URL_SLUG = {
+        "epic":   "epic",
+        "steam":  "steam",
+        "ps4":    "psn",
+        "xbox":   "xbl",
+        "switch": "switch",
+    }
 
     def update_players(self, players):
         self._players = players
@@ -2340,7 +2436,9 @@ class PlayersOverlayWindow(QMainWindow):
                 name       = p.get("Name", "?")
                 primary_id = p.get("PrimaryId", "")
                 platform   = self._platform_from_id(primary_id)
-                user_id    = self._id_from_primary_id(primary_id) or name
+                raw_id     = self._id_from_primary_id(primary_id) or name
+                # Steam utilise l'ID numérique ; toutes les autres plateformes utilisent le pseudo
+                user_id    = raw_id if platform == "steam" else name
                 pb = QPushButton(name)
                 pb.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
                 pb.setStyleSheet(f"""
@@ -2365,9 +2463,10 @@ class PlayersOverlayWindow(QMainWindow):
         return "epic"
 
     def _id_from_primary_id(self, primary_id):
-        """Extrait l'ID utilisateur depuis PrimaryId (ex: 'Steam|76561198...' → '76561198...')."""
-        if "|" in primary_id:
-            return primary_id.split("|", 1)[1]
+        """Extrait l'ID utilisateur depuis PrimaryId (ex: 'Steam|76561198...|0' → '76561198...')."""
+        parts = primary_id.split("|")
+        if len(parts) >= 2:
+            return parts[1]
         return primary_id
 
     def _open_profile(self, user_id, platform):
@@ -2375,11 +2474,11 @@ class PlayersOverlayWindow(QMainWindow):
         last = self._tracker_last_open.get(user_id, 0)
         remaining = self._TRACKER_COOLDOWN_S - (now - last)
         if remaining > 0:
-            # Cooldown actif — on ignore le clic silencieusement
             return
         self._tracker_last_open[user_id] = now
+        slug = self._URL_SLUG.get(platform, platform)
         url = (f"https://rocketleague.tracker.network/rocket-league/profile"
-               f"/{platform}/{urllib.parse.quote(user_id)}/overview")
+               f"/{slug}/{urllib.parse.quote(user_id)}/overview")
         QDesktopServices.openUrl(QUrl(url))
 
 
