@@ -2570,12 +2570,10 @@ class InGameMMROverlay(QMainWindow):
         self._top_timer.timeout.connect(self._enforce_topmost)
         self._top_timer.start(2000)
 
-        # Refresh interne (toutes les 600 ms) pour mise à jour live des stats
+        # Refresh interne — démarré seulement quand l'overlay est visible (voir showEvent/hideEvent)
+        # pour éviter de créer/détruire des QWidgets toutes les 600 ms en arrière-plan.
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._rebuild_rows)
-        self._refresh_timer.start(600)
-
-        self._rebuild_rows()
 
     # ── Drag ──────────────────────────────────────────────────────────────
     def _mouse_press(self, e):
@@ -2589,6 +2587,9 @@ class InGameMMROverlay(QMainWindow):
     # ── Topmost ───────────────────────────────────────────────────────────
     def showEvent(self, e):
         super().showEvent(e)
+        # Démarre le timer de refresh uniquement quand l'overlay est visible
+        self._refresh_timer.start(600)
+        self._rebuild_rows()   # affichage immédiat à l'ouverture
         self._enforce_topmost()
         # Centrer en haut de l'écran au premier affichage
         screen = QApplication.primaryScreen().availableGeometry()
@@ -2605,13 +2606,19 @@ class InGameMMROverlay(QMainWindow):
         except Exception:
             pass
 
+    def hideEvent(self, e):
+        """Arrête le timer de refresh quand l'overlay est caché — évite le churn de widgets."""
+        super().hideEvent(e)
+        self._refresh_timer.stop()
+
     # ── Données ───────────────────────────────────────────────────────────
     def set_data(self, players: list, stats: dict, playlist_key: str):
-        """Appelée par MainApp pour injecter les joueurs et les stats."""
+        """Appelée par MainApp pour injecter les joueurs et les stats.
+        Ne reconstruit pas les widgets directement — le _refresh_timer s'en charge
+        toutes les 600 ms quand l'overlay est visible (évite le double-rebuild)."""
         self._players      = players
         self._stats        = stats
         self._playlist_key = playlist_key
-        self._rebuild_rows()
 
     def _pl_id(self) -> int:
         return self._PLAYLIST_IDS.get(self._playlist_key, 11)
@@ -2706,12 +2713,26 @@ class InGameMMROverlay(QMainWindow):
                     mmr_color = C_MUTE
 
                 elif status == "error":
-                    icon_lbl.setText("✕")
-                    icon_lbl.setStyleSheet(
-                        f"color:{C_ORG};font-size:11px;background:transparent;")
-                    mmr_str   = "API Error"
+                    http_code = entry.get("http_code", 0) if entry else 0
+                    if http_code == 403:
+                        mmr_str   = "Privé 🔒"
+                        mmr_color = C_MUTE
+                        icon_lbl.setText("🔒")
+                        icon_lbl.setStyleSheet(
+                            f"color:{C_MUTE};font-size:13px;background:transparent;")
+                    elif http_code == 404:
+                        mmr_str   = "Introuvable"
+                        mmr_color = C_MUTE
+                        icon_lbl.setText("?")
+                        icon_lbl.setStyleSheet(
+                            f"color:{C_MUTE};font-size:14px;background:transparent;")
+                    else:
+                        mmr_str   = f"Err {http_code}" if http_code else "API Error"
+                        mmr_color = C_ORG
+                        icon_lbl.setText("✕")
+                        icon_lbl.setStyleSheet(
+                            f"color:{C_ORG};font-size:11px;background:transparent;")
                     rank_str  = ""
-                    mmr_color = C_ORG
 
                 else:  # bot / pas de PID
                     icon_lbl.setText("🤖")
@@ -3076,6 +3097,77 @@ class _CtrlCanvas(QWidget):
                        Qt.AlignmentFlag.AlignCenter, label)
 
 
+class StreamerModeBar(QWidget):
+    """Barre noire en haut de l'écran — mode streamer.
+    Cache le popup 'Partie trouvée' de Rocket League pour éviter le stream-sniping.
+    Transparente aux clics souris. Aucun timer actif quand cachée.
+    """
+
+    BAR_HEIGHT = 80    # hauteur en pixels (couvre la notif RL)
+
+    def __init__(self):
+        super().__init__(
+            None,
+            Qt.WindowType.FramelessWindowHint  |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool                 |
+            Qt.WindowType.BypassWindowManagerHint,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+        screen = QApplication.primaryScreen().geometry()
+        self.setGeometry(screen.x(), screen.y(), screen.width(), self.BAR_HEIGHT)
+        self.setStyleSheet("background:#000000;")
+
+        # Label très discret — rappel visuel du mode actif
+        hint = QLabel("🎥  MODE STREAMER", self)
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setGeometry(0, 0, screen.width(), self.BAR_HEIGHT)
+        hint.setStyleSheet(
+            "color:rgba(255,255,255,0.07);font-size:11px;"
+            "font-weight:700;letter-spacing:4px;background:transparent;"
+        )
+        self.hide()
+
+    def showEvent(self, e):
+        """Force le topmost une seule fois à l'affichage — pas de timer permanent."""
+        super().showEvent(e)
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                hwnd = int(self.winId())
+                HWND_TOPMOST, SWP_NOMOVE_NOSIZE = -1, 0x0003
+                ctypes.windll.user32.SetWindowPos(
+                    hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE_NOSIZE)
+                GWL_EXSTYLE = -20
+                ex = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+                # WS_EX_NOACTIVATE | WS_EX_TRANSPARENT
+                ctypes.windll.user32.SetWindowLongW(
+                    hwnd, GWL_EXSTYLE, ex | 0x08000000 | 0x00000020)
+            except Exception:
+                pass
+
+    def hideEvent(self, e):
+        """Force le masquage via Win32 — nécessaire en fullscreen exclusif DirectX
+        où hide() Qt seul ne suffit pas à masquer une fenêtre HWND_TOPMOST."""
+        super().hideEvent(e)
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                hwnd = int(self.winId())
+                SW_HIDE = 0
+                ctypes.windll.user32.ShowWindow(hwnd, SW_HIDE)
+                # Repasser en fenêtre non-topmost pour éviter qu'elle reste
+                # dans la liste des fenêtres top-level après masquage.
+                HWND_NOTOPMOST = -2
+                SWP_NOMOVE_NOSIZE = 0x0003
+                ctypes.windll.user32.SetWindowPos(
+                    hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE_NOSIZE)
+            except Exception:
+                pass
+
+
 class ControllerOverlay(QMainWindow):
     """Fenêtre overlay manette — draggable, always on top, 60 Hz."""
 
@@ -3098,10 +3190,10 @@ class ControllerOverlay(QMainWindow):
         self._canvas.mousePressEvent  = self._mp
         self._canvas.mouseMoveEvent   = self._mm
 
-        # Polling 60 Hz
+        # Polling 30 Hz (33 ms) — suffisant pour un overlay manette, réduit la charge event loop
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll)
-        self._poll_timer.start(16)
+        self._poll_timer.start(33)
 
         # Topmost toutes les 2 s
         self._top_timer = QTimer(self)
