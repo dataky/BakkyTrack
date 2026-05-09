@@ -45,7 +45,7 @@ from PyQt6.QtCore    import Qt, QTimer, pyqtSignal, QObject, QUrl, QPointF, QRec
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QFrame, QTabWidget, QLineEdit, QComboBox,
-    QTextEdit, QStackedWidget, QScrollArea, QCheckBox, QDialog
+    QTextEdit, QStackedWidget, QScrollArea, QCheckBox, QDialog, QSlider
 )
 from PyQt6.QtGui import (
     QColor, QCursor, QPainter, QBrush, QPen, QLinearGradient, QRadialGradient, QFont,
@@ -1090,6 +1090,46 @@ class SoundTab(QWidget):
         hl = QVBoxLayout(header); hl.setContentsMargins(14, 10, 14, 10)
         hl.addWidget(lbl("Place tes fichiers .mp3 / .wav dans le meme dossier que l exe.", C_MUTE, 8))
         root.addWidget(header)
+
+        # ── Slider de volume global ───────────────────────────────────────
+        vol_card = card()
+        vl = QVBoxLayout(vol_card); vl.setContentsMargins(14, 10, 14, 12); vl.setSpacing(6)
+        vl.addWidget(lbl("VOLUME GLOBAL", C_MUTE, 9))
+
+        vol_row = QHBoxLayout(); vol_row.setSpacing(10)
+        vol_icon = lbl("🔈", C_TEXT, 12)
+        self._vol_slider = QSlider(Qt.Orientation.Horizontal)
+        self._vol_slider.setRange(0, 100)
+        self._vol_slider.setValue(int(self.app.config.get("sound_volume", 100)))
+        self._vol_slider.setFixedHeight(22)
+        self._vol_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                background: #1A1E2A; border-radius: 4px; height: 6px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #1A8CFF; border-radius: 4px; height: 6px;
+            }
+            QSlider::handle:horizontal {
+                background: #E8ECF4; border-radius: 7px;
+                width: 14px; height: 14px; margin: -4px 0;
+            }
+            QSlider::handle:horizontal:hover { background: #1A8CFF; }
+        """)
+        self._vol_pct = lbl(f"{self._vol_slider.value()}%", C_TEXT, 10, bold=True)
+        self._vol_pct.setFixedWidth(36)
+
+        def _on_vol(v):
+            self._vol_pct.setText(f"{v}%")
+            self.app.config["sound_volume"] = v
+
+        self._vol_slider.valueChanged.connect(_on_vol)
+
+        vol_row.addWidget(vol_icon)
+        vol_row.addWidget(self._vol_slider, 1)
+        vol_row.addWidget(lbl("🔊", C_TEXT, 12))
+        vol_row.addWidget(self._vol_pct)
+        vl.addLayout(vol_row)
+        root.addWidget(vol_card)
 
         for key, label in _SOUND_EVENTS:
             cfg_en  = f"sound_{key}"
@@ -2204,6 +2244,8 @@ class MainApp(QMainWindow):
                 if not pygame.mixer.get_init():
                     pygame.mixer.init()
                 snd = pygame.mixer.Sound(path)
+                vol = self.config.get("sound_volume", 100) / 100.0
+                snd.set_volume(max(0.0, min(1.0, vol)))
                 snd.play()
                 ms = int(snd.get_length() * 1000) + 100
                 pygame.time.wait(min(ms, 10000))
