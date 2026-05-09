@@ -28,7 +28,6 @@ BakkyTrack expose un serveur HTTP local sur le **port 49124** pour les overlays 
 ## 📦 Prérequis
 
 - **Python 3.10+**
-- **BakkesMod** avec le plugin *StatsAPI* activé (port par défaut `49123`)
 - **Windows** (certaines fonctionnalités utilisent l'API Win32)
 
 ---
