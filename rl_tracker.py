@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-BakkesMod v2 — Compatible StatsAPI
-  Onglet 1 : Tracker   (W/L, MMR, streak)
-  Onglet 2 : Joueurs   (liste match en cours, clic → tracker.network)
-  Onglet 3 : Overlay   (activation, compact/bannière, mode MMR)
-  Onglet 4 : Auto      (skip replay, auto-queue, freeplay)
-  Onglet 5 : Sons      (activation de sons sur les événements du jeu)
-  Onglet 6 : Paramètres
+BakkyTrack — companion Rocket League (StatsAPI / tracker.gg)
+  Onglet 1 : Stats     (W/L, MMR, streak)
+  Onglet 2 : Match     (joueurs en jeu → tracker.network)
+  Onglet 3 : Overlay   (compact / bannière, MMR in-game)
+  Onglet 4 : Auto      (skip replay, file, freeplay)
+  Onglet 5 : Sons      (événements StatsAPI)
+  Onglet 6 : Options
 """
 
 import sys, json, time, threading, os, socket, urllib.parse, urllib.request, urllib.error
@@ -35,12 +35,14 @@ try:
 except ImportError:
     PYGAME_AVAILABLE = False
 
+from gamepad_state import get_gamepad_state
 
-from PyQt6.QtCore    import Qt, QTimer, pyqtSignal, QObject, QUrl, QPointF, QRectF, QByteArray, QThread
+from PyQt6.QtCore    import Qt, QTimer, pyqtSignal, QObject, QUrl, QPointF, QRectF, QByteArray, QThread, QSize
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QFrame, QTabWidget, QLineEdit, QComboBox,
-    QTextEdit, QStackedWidget, QScrollArea, QCheckBox, QDialog, QSlider
+    QTextEdit, QPlainTextEdit, QStackedWidget, QScrollArea, QCheckBox, QDialog,
+    QSlider, QStyle, QSizePolicy, QProgressBar,
 )
 from PyQt6.QtGui import (
     QColor, QCursor, QPainter, QBrush, QPen, QLinearGradient, QRadialGradient, QFont,
@@ -105,6 +107,9 @@ DEFAULT_CONFIG = {
     "overlay_hotkey_type":           "key",   # "key" | "controller"
     "overlay_hotkey_key":            "key:tab",
     "overlay_hotkey_controller_btn": 0,
+    # Overlay manette
+    "controller_overlay_enabled":    False,
+    "controller_overlay_mode":       "with_bg",   # "with_bg" | "transparent"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -122,19 +127,24 @@ C_GOLD  = "#FFD700"
 
 APP_STYLE = f"""
 QWidget {{ background:transparent; color:{C_TEXT};
-           font-family:'Rajdhani','Segoe UI',sans-serif; font-size:12px; }}
+           font-family:'Segoe UI','Rajdhani',system-ui,sans-serif; font-size:13px; }}
 QMainWindow {{ background:transparent; }}
+QToolTip {{ background:{C_BG3}; color:{C_TEXT}; border:none;
+            padding:6px 8px; font-size:11px; border-radius:4px; }}
 QTabWidget {{ background:transparent; }}
-QTabWidget::pane {{ border:1px solid {C_BG3}; background:rgba(12,14,20,0.80); }}
-QTabBar::tab {{ background:rgba(18,20,28,0.88); color:{C_MUTE}; padding:8px 14px;
-                border:none; font-size:10px; font-weight:700; letter-spacing:1px; }}
-QTabBar::tab:selected {{ background:rgba(28,32,46,0.96); color:{C_TEXT};
-                         border-bottom:2px solid {C_BLUE}; }}
-QTabBar::tab:hover:!selected {{ color:{C_TEXT}; }}
+QTabWidget::pane {{ border:none;
+                    background:rgba(14,16,22,0.92); border-radius:0 0 8px 8px; }}
+QTabBar::tab {{ background:rgba(22,24,32,0.92); color:{C_MUTE};
+                padding:10px 12px; min-height:20px; border:none;
+                font-size:11px; font-weight:600; letter-spacing:0.3px;
+                border-top-left-radius:6px; border-top-right-radius:6px; margin-right:2px; }}
+QTabBar::tab:selected {{ background:rgba(32,36,48,0.98); color:{C_TEXT};
+                         border-bottom:3px solid {C_BLUE}; padding-bottom:7px; }}
+QTabBar::tab:hover:!selected {{ color:{C_TEXT}; background:rgba(28,30,40,0.95); }}
 QLineEdit, QComboBox {{ background:{C_BG3}; color:{C_TEXT};
-                        border:1px solid {C_BG3}; border-radius:4px;
+                        border:none; border-radius:4px;
                         padding:5px 9px; font-size:11px; }}
-QLineEdit:focus, QComboBox:focus {{ border:1px solid {C_BLUE}; }}
+QLineEdit:focus, QComboBox:focus {{ border:none; outline:none; }}
 QComboBox::drop-down {{ border:none; padding-right:8px; }}
 QComboBox QAbstractItemView {{ background:{C_BG3}; color:{C_TEXT};
                                selection-background-color:{C_BLUE}; outline:none; }}
@@ -145,8 +155,8 @@ QScrollBar::handle:vertical {{ background:{C_BG3}; border-radius:2px; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
 QCheckBox {{ color:{C_TEXT}; font-size:11px; spacing:8px; }}
 QCheckBox::indicator {{ width:16px; height:16px; border-radius:3px;
-                        border:1px solid {C_BG3}; background:{C_BG3}; }}
-QCheckBox::indicator:checked {{ background:{C_BLUE}; border-color:{C_BLUE}; }}
+                        border:none; background:{C_BG3}; }}
+QCheckBox::indicator:checked {{ background:{C_BLUE}; border:none; }}
 QScrollArea {{ background:transparent; border:none; }}
 QScrollArea > QWidget > QWidget {{ background:transparent; }}
 """
@@ -156,14 +166,16 @@ QScrollArea > QWidget > QWidget {{ background:transparent; }}
 # ─────────────────────────────────────────────────────────────────────────────
 def card(parent=None, bg=C_BG2):
     f = QFrame(parent)
-    f.setStyleSheet(f"QFrame{{background:{bg};border-radius:6px;}}")
+    f.setStyleSheet(
+        f"QFrame{{background:{bg};border-radius:8px;border:none;}}")
     return f
 
 def lbl(text, color=C_MUTE, size=9, bold=False, parent=None):
     w = QLabel(text, parent)
     weight = "700" if bold else "400"
+    # Letter-spacing léger : meilleure lisibilité en français qu’avec 1px partout
     w.setStyleSheet(f"color:{color};font-size:{size}px;font-weight:{weight};"
-                    f"background:transparent;letter-spacing:1px;")
+                    f"background:transparent;letter-spacing:0.25px;")
     return w
 
 def btn(text, bg=C_BG3, fg=C_TEXT, size=10, bold=True, parent=None):
@@ -230,50 +242,6 @@ class AppSignals(QObject):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  XINPUT — Support manette Xbox  (même logique qu'InGameRank)
-# ─────────────────────────────────────────────────────────────────────────────
-if sys.platform == "win32":
-    import ctypes as _ctypes
-    from ctypes import wintypes as _wt
-
-    class _XINPUT_GAMEPAD(_ctypes.Structure):
-        _fields_ = [
-            ("wButtons",      _wt.WORD),
-            ("bLeftTrigger",  _wt.BYTE),
-            ("bRightTrigger", _wt.BYTE),
-            ("sThumbLX",      _wt.SHORT),
-            ("sThumbLY",      _wt.SHORT),
-            ("sThumbRX",      _wt.SHORT),
-            ("sThumbRY",      _wt.SHORT),
-        ]
-
-    class _XINPUT_STATE(_ctypes.Structure):
-        _fields_ = [
-            ("dwPacketNumber", _wt.DWORD),
-            ("Gamepad",        _XINPUT_GAMEPAD),
-        ]
-
-    _xinput = None
-    for _lib in ("xinput1_4", "xinput1_3", "xinput9_1_0"):
-        try:
-            _xinput = getattr(_ctypes.windll, _lib)
-            break
-        except OSError:
-            pass
-
-    def _get_xinput_state(user_index=0):
-        if not _xinput:
-            return None
-        state = _XINPUT_STATE()
-        return state if _xinput.XInputGetState(user_index, _ctypes.byref(state)) == 0 else None
-else:
-    def _get_xinput_state(user_index=0):
-        return None
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 #  BIND WORKER — Détecte la prochaine touche clavier OU bouton manette
 # ─────────────────────────────────────────────────────────────────────────────
 class BindWorker(QThread):
@@ -283,10 +251,8 @@ class BindWorker(QThread):
     def run(self):
         time.sleep(0.4)   # évite de capturer la touche qui a ouvert le dialog
 
-        if sys.platform == "win32":
-            import ctypes
-            # Vide l'état courant
-            _get_xinput_state()
+        # Vide l'état courant manette (XInput ou SDL)
+        get_gamepad_state()
 
         while True:
             # ── Clavier (VK scan Windows) ──────────────────────────────────
@@ -310,13 +276,13 @@ class BindWorker(QThread):
                             self.finished_bind.emit(f"key:{chr(vk).lower()}", False, 0)
                             return
 
-            # ── Manette XInput ────────────────────────────────────────────
-            xi = _get_xinput_state()
+            # ── Manette (XInput / SDL) ─────────────────────────────────────
+            xi = get_gamepad_state()
             if xi and xi.Gamepad.wButtons != 0:
                 btn = xi.Gamepad.wButtons
                 # Attendre relâchement
                 while True:
-                    xi2 = _get_xinput_state()
+                    xi2 = get_gamepad_state()
                     if not xi2 or xi2.Gamepad.wButtons == 0:
                         break
                     time.sleep(0.05)
@@ -517,7 +483,7 @@ def _fetch_player_for_ingame(primary_id: str, display_name: str, cache: dict):
 
 
 from overlay_widgets import *
-from overlay_widgets import _CompactCard, _key_to_vk, _VK_MAP
+from overlay_widgets import _CompactCard, _key_to_vk, _VK_MAP, ControllerOverlay
 
 class TrackerTab(QWidget):
     def __init__(self, app_ref):
@@ -533,18 +499,39 @@ class TrackerTab(QWidget):
 
         # ── Connexion StatsAPI ──────────────────────────────────────────────
         conn = card()
-        cl = QHBoxLayout(conn); cl.setContentsMargins(12, 10, 12, 10)
+        cl = QVBoxLayout(conn)
+        cl.setContentsMargins(12, 10, 12, 10)
+        cl.setSpacing(6)
+        conn_title = lbl("CONNEXION AU JEU", C_MUTE, 8, True)
+        conn_hint = lbl(
+            "Les événements du jeu arrivent ici via StatsAPI — le port doit être identique "
+            "à celui configuré dans le plugin BakkyTrack (côté Rocket League).",
+            C_MUTE, 9)
+        conn_hint.setWordWrap(True)
+        cl.addWidget(conn_title)
+        cl.addWidget(conn_hint)
+        row_conn = QHBoxLayout()
         self._dot = QLabel("●")
         self._dot.setStyleSheet(f"color:{C_MUTE};font-size:14px;background:transparent;")
         self._status_lbl = lbl("Non connecté")
-        port_lbl = lbl("Port:")
+        port_lbl = lbl("Port :")
         self._port_edit = QLineEdit(str(self.app.config["statsapi_port"]))
         self._port_edit.setFixedWidth(60)
+        self._port_edit.setToolTip(
+            "Identique au port StatsAPI indiqué dans les réglages du plugin BakkyTrack.")
         reconn_btn = btn("Reconnecter", bg=C_BG3, size=9)
+        reconn_btn.setToolTip("Réessaie la connexion au serveur local StatsAPI.")
         reconn_btn.clicked.connect(self.app.reconnect_statsapi)
-        cl.addWidget(self._dot); cl.addSpacing(6); cl.addWidget(self._status_lbl)
-        cl.addStretch(); cl.addWidget(port_lbl); cl.addSpacing(4)
-        cl.addWidget(self._port_edit); cl.addSpacing(8); cl.addWidget(reconn_btn)
+        row_conn.addWidget(self._dot)
+        row_conn.addSpacing(6)
+        row_conn.addWidget(self._status_lbl)
+        row_conn.addStretch()
+        row_conn.addWidget(port_lbl)
+        row_conn.addSpacing(4)
+        row_conn.addWidget(self._port_edit)
+        row_conn.addSpacing(8)
+        row_conn.addWidget(reconn_btn)
+        cl.addLayout(row_conn)
         root.addWidget(conn)
 
         # ── Infos joueur + MMR ─────────────────────────────────────────────
@@ -552,9 +539,12 @@ class TrackerTab(QWidget):
         il = QVBoxLayout(info); il.setContentsMargins(14, 12, 14, 12); il.setSpacing(7)
 
         row_player = QHBoxLayout()
-        row_player.addWidget(lbl("JOUEUR DÉTECTÉ", C_MUTE, 8))
+        row_player.addWidget(lbl("COMPTE DÉTECTÉ (EN JEU)", C_MUTE, 8, True))
         self._player_lbl = lbl("--", C_TEXT, 11, True)
-        row_player.addStretch(); row_player.addWidget(self._player_lbl)
+        self._player_lbl.setToolTip(
+            "Pseudo tel qu’envoyé par le jeu via StatsAPI (plugin BakkyTrack).")
+        row_player.addStretch()
+        row_player.addWidget(self._player_lbl)
         il.addLayout(row_player); il.addWidget(hsep())
 
         row_mmr = QHBoxLayout()
@@ -566,8 +556,21 @@ class TrackerTab(QWidget):
         self._rank_icon_lbl.setFixedSize(28, 28)
         self._rank_icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._rank_icon_lbl.setStyleSheet("background:transparent;")
-        ref_btn = btn("↻", bg=C_BG3, size=12)
+        # Icône système (évite le glyphe ↻ mal rendu selon la police du thème)
+        ref_btn = QPushButton()
+        ref_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         ref_btn.setFixedSize(26, 26)
+        ref_btn.setIcon(
+            ref_btn.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        ref_btn.setIconSize(QSize(14, 14))
+        ref_btn.setStyleSheet(f"""
+            QPushButton{{background:{C_BG3};border:none;border-radius:4px;}}
+            QPushButton:hover{{background:{C_BG3}cc;}}
+            QPushButton:pressed{{background:{C_BG3}99;}}
+        """)
+        ref_btn.setToolTip(
+            "Met à jour le MMR et les rangs via tracker.gg tout de suite "
+            "(contourne le délai entre deux mises à jour automatiques).")
         ref_btn.clicked.connect(lambda: self.app.fetch_mmr_async(force=True))
         row_mmr.addStretch()
         row_mmr.addWidget(self._rank_icon_lbl); row_mmr.addSpacing(4)
@@ -590,15 +593,25 @@ class TrackerTab(QWidget):
 
         for side in ("win", "loss"):
             c_card = card()
+            c_card.setFixedHeight(124)
+            c_card.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             color  = C_BLUE if side == "win" else C_ORG
             label  = "VICTOIRES" if side == "win" else "DÉFAITES"
             bar    = QFrame(c_card); bar.setFixedHeight(3)
             bar.setStyleSheet(f"background:{color};border:none;")
-            cl2 = QVBoxLayout(c_card); cl2.setContentsMargins(0,0,0,10)
+            cl2 = QVBoxLayout(c_card); cl2.setContentsMargins(0,0,0,8)
+            cl2.setSpacing(2)
             cl2.addWidget(bar)
             cl2.addWidget(lbl(label, color, 9), alignment=Qt.AlignmentFlag.AlignHCenter)
-            count_lbl = QLabel("0"); count_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            count_lbl.setStyleSheet(f"color:{color};font-size:52px;font-weight:700;background:transparent;")
+            count_lbl = QLabel("0")
+            count_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            count_lbl.setFixedHeight(54)
+            count_lbl.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            count_lbl.setStyleSheet(
+                f"color:{color};font-size:52px;font-weight:700;"
+                f"background:transparent;")
             cl2.addWidget(count_lbl)
             brow = QHBoxLayout(); brow.setSpacing(6); brow.setContentsMargins(10,0,10,0)
             bp = btn("+", bg=C_BG3, size=14); bm = btn("−", bg=C_BG3, size=14)
@@ -616,19 +629,32 @@ class TrackerTab(QWidget):
 
         # ── Win rate bar ────────────────────────────────────────────────────
         wr_card = card()
+        wr_card.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         wrc = QVBoxLayout(wr_card); wrc.setContentsMargins(14, 8, 14, 8); wrc.setSpacing(4)
         wr_top = QHBoxLayout()
         wr_top.addWidget(lbl("WIN RATE", C_MUTE, 9))
         self._wr_lbl = lbl("--", C_TEXT, 13, True)
         wr_top.addStretch(); wr_top.addWidget(self._wr_lbl)
         wrc.addLayout(wr_top)
-        bar_bg = QFrame(); bar_bg.setFixedHeight(8)
-        bar_bg.setStyleSheet(f"background:#1A0500;border-radius:4px;")
-        bar_layout = QHBoxLayout(bar_bg); bar_layout.setContentsMargins(0,0,0,0)
-        self._bar = QFrame(); self._bar.setFixedHeight(8)
-        self._bar.setStyleSheet(f"background:{C_BLUE};border-radius:4px;")
-        bar_layout.addWidget(self._bar); bar_layout.addStretch()
-        wrc.addWidget(bar_bg)
+        # QProgressBar : évite setFixedWidth sur un QFrame enfant (boucle de
+        # largeur min / scroll qui pouvait étirer toute la fenêtre quand W+L > 0).
+        self._wr_progress = QProgressBar()
+        self._wr_progress.setRange(0, 100)
+        self._wr_progress.setValue(0)
+        self._wr_progress.setTextVisible(False)
+        self._wr_progress.setFixedHeight(10)
+        self._wr_progress.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._wr_progress.setStyleSheet(f"""
+            QProgressBar {{
+                border: none; background: #1A0500; border-radius: 4px;
+            }}
+            QProgressBar::chunk {{
+                background: {C_BLUE}; border-radius: 4px;
+            }}
+        """)
+        wrc.addWidget(self._wr_progress)
         root.addWidget(wr_card)
 
         # ── Mini stats ──────────────────────────────────────────────────────
@@ -649,15 +675,38 @@ class TrackerTab(QWidget):
 
         # ── Log StatsAPI ───────────────────────────────────────────────────
         dbg = card()
+        dbg.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         dl = QVBoxLayout(dbg); dl.setContentsMargins(12, 8, 12, 10); dl.setSpacing(6)
         dl.addWidget(lbl("MESSAGES STATSAPI", C_MUTE, 8))
-        self._log = QTextEdit(); self._log.setReadOnly(True); self._log.setFixedHeight(70)
+        # QPlainTextEdit + hauteur fixe : évite l’étirement vertical du layout
+        # (QTextEdit a une politique Expanding et peut absorber l’espace du QScrollArea).
+        self._log = QPlainTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setFixedHeight(72)
+        self._log.setMaximumBlockCount(400)
+        self._log.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self._log.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._log.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._log.setStyleSheet(
+            f"QPlainTextEdit{{background:{C_BG3};color:{C_MUTE};border:none;"
+            f"font-family:'Consolas','Courier New',monospace;font-size:9px;"
+            f"padding:4px;border-radius:4px;}}")
         dl.addWidget(self._log)
         root.addWidget(dbg)
 
         reset_btn = btn("Réinitialiser la session", bg=C_BG, fg=C_MUTE, size=10)
+        reset_btn.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         reset_btn.clicked.connect(self.app.reset_session)
         root.addWidget(reset_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
+        # Espace résiduel du QScrollArea en bas (évite de l’injecter dans les cartes)
+        root.addStretch(1)
+
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
     def _connect_signals(self):
         s = self.app.signals
@@ -685,13 +734,13 @@ class TrackerTab(QWidget):
         total = a.wins + a.losses
         self._total_lbl.setText(str(total))
         if total == 0:
-            self._wr_lbl.setText("--"); self._bar.setFixedWidth(0); self._streak_lbl.setText("--")
+            self._wr_lbl.setText("--")
+            self._wr_progress.setValue(0)
+            self._streak_lbl.setText("--")
         else:
             wr = round(a.wins / total * 100)
             self._wr_lbl.setText(f"{wr}%")
-            bar_parent = self._bar.parent()
-            if bar_parent:
-                self._bar.setFixedWidth(max(1, int(bar_parent.width() * wr / 100)))
+            self._wr_progress.setValue(wr)
             if a.streak > 1:
                 self._streak_lbl.setText(f"{a.streak}{'W' if a.streak_type=='win' else 'L'}")
             else:
@@ -729,7 +778,7 @@ class TrackerTab(QWidget):
         self._rank_lbl.setStyleSheet(f"color:{C_ORG};font-size:9px;background:transparent;")
 
     def _on_log(self, msg):
-        self._log.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+        self._log.appendPlainText(f"[{time.strftime('%H:%M:%S')}] {msg}")
         sb = self._log.verticalScrollBar()
         sb.setValue(sb.maximum())
 
@@ -859,9 +908,8 @@ class PlayersTab(QWidget):
 
         plat_lbl = QLabel(platform.upper())
         plat_lbl.setStyleSheet(
-            f"color:{C_BG};background:{C_MUTE};border-radius:3px;"
-            f"padding:2px 5px;font-size:7px;font-weight:700;background:transparent;"
-            f"color:{C_MUTE};border:1px solid {C_BG3};")
+            f"color:{C_MUTE};background:transparent;border-radius:3px;"
+            f"padding:2px 5px;font-size:7px;font-weight:700;border:none;")
 
         name_lbl = lbl(player.get("Name", "?"), color, 12, True)
         stats_lbl = lbl(
@@ -912,9 +960,25 @@ class OverlayTab(QWidget):
         self._build()
 
     def _build(self):
-        root = QVBoxLayout(self)
+        # ── Wrapper scrollable ────────────────────────────────────────────
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("background:transparent;border:none;")
+
+        inner_w = QWidget()
+        inner_w.setStyleSheet("background:transparent;")
+        root = QVBoxLayout(inner_w)
         root.setContentsMargins(16, 20, 16, 16)
         root.setSpacing(12)
+
+        scroll.setWidget(inner_w)
+        outer.addWidget(scroll)
 
         # ── Touche hold-to-show ───────────────────────────────────────────
         hk_card = card()
@@ -922,7 +986,7 @@ class OverlayTab(QWidget):
         hkl.addWidget(lbl("TOUCHE D'OVERLAY  (maintenir = afficher)", C_MUTE, 9))
         hkl.addWidget(lbl(
             "Maintiens cette touche en jeu pour afficher l'overlay.\n"
-            "Supporte clavier (défaut : Tab) et manette Xbox.",
+            "Supporte clavier (défaut : Tab) et manette (Xbox / PlayStation via XInput ou SDL).",
             C_TEXT, 9))
 
         hk_row = QHBoxLayout()
@@ -930,7 +994,7 @@ class OverlayTab(QWidget):
         self._hk_display.setFixedWidth(170)
         self._hk_display.setStyleSheet(
             f"background:{C_BG3};color:{C_TEXT};border-radius:4px;"
-            f"padding:5px 9px;font-size:11px;border:1px solid {C_BG3};")
+            f"padding:5px 9px;font-size:11px;border:none;")
         hk_bind_btn = QPushButton("🎯  Configurer")
         hk_bind_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         hk_bind_btn.setStyleSheet(
@@ -942,7 +1006,7 @@ class OverlayTab(QWidget):
         hkl.addLayout(hk_row)
         root.addWidget(hk_card)
 
-        # ── Toggle ────────────────────────────────────────────────────────
+        # ── Toggle overlay principal ──────────────────────────────────────
         tog_card = card()
         tl = QVBoxLayout(tog_card); tl.setContentsMargins(16,16,16,16); tl.setSpacing(8)
         tl.addWidget(lbl("OVERLAY", C_MUTE, 9))
@@ -960,20 +1024,19 @@ class OverlayTab(QWidget):
         r_mode = QHBoxLayout()
         r_mode.addWidget(lbl("Type d'overlay", C_TEXT, 11))
         self._mode_combo = QComboBox()
-        
-        # Charger les overlays dynamiquement depuis overlay_widgets
+
         from overlay_widgets import _load_overlay_plugins
-        self._available_modes = _load_overlay_plugins()  # {name: {widget, size}}
+        self._available_modes = _load_overlay_plugins()
         self._MODE_MAP = {}
         self._MODE_REVERSE = {}
-        
+
         for idx, (mode_name, mode_info) in enumerate(sorted(self._available_modes.items())):
             size = mode_info.get("size", (0, 0))
             display_text = f"{mode_name}  ({size[0]}×{size[1]})"
             self._mode_combo.addItem(display_text)
             self._MODE_MAP[idx] = mode_name
             self._MODE_REVERSE[mode_name] = idx
-        
+
         self._mode_combo.setFixedWidth(200)
         self._mode_combo.currentIndexChanged.connect(
             lambda i: self._set_mode(self._MODE_MAP.get(i, "compact")))
@@ -1006,16 +1069,86 @@ class OverlayTab(QWidget):
         prev_inner.addStretch(); prev_inner.addWidget(self._preview); prev_inner.addStretch()
         pl.addLayout(prev_inner)
         root.addWidget(prev_card)
+
+        # ── Overlay Manette ───────────────────────────────────────────────
+        ctrl_card = card()
+        ctl = QVBoxLayout(ctrl_card); ctl.setContentsMargins(16,14,16,16); ctl.setSpacing(10)
+        ctl.addWidget(lbl("OVERLAY MANETTE  (XInput / SDL — Xbox & PlayStation)", C_MUTE, 9))
+
+        self._ctrl_toggle_btn = btn(
+            "🎮  ACTIVER L'OVERLAY MANETTE", bg=C_BG3, fg=C_TEXT, size=11)
+        self._ctrl_toggle_btn.setFixedHeight(40)
+        self._ctrl_toggle_btn.clicked.connect(self._toggle_controller)
+        ctl.addWidget(self._ctrl_toggle_btn)
+
+        style_row = QHBoxLayout()
+        style_row.addWidget(lbl("Style :", C_TEXT, 11))
+        style_row.addStretch()
+        self._ctrl_style_btns = {}
+        for mode_key, mode_label in [("with_bg", "Avec fond"), ("transparent", "Transparent")]:
+            b = btn(mode_label, bg=C_BG3, fg=C_MUTE, size=10)
+            b.setFixedHeight(30)
+            b.clicked.connect(lambda _, m=mode_key: self._set_ctrl_mode(m))
+            style_row.addWidget(b)
+            self._ctrl_style_btns[mode_key] = b
+        ctl.addLayout(style_row)
+        ctl.addWidget(lbl(
+            "Déplaçable en jeu. Polling 60 Hz — aucun impact sur les perfs.",
+            C_MUTE, 8))
+        root.addWidget(ctrl_card)
+
         root.addStretch()
 
+        # ── Init states ───────────────────────────────────────────────────
         self._active = False
         saved_mode = self.app.config.get("overlay_mode", "compact")
-        # Si le mode sauvegardé n'existe pas, utiliser le premier disponible
         if saved_mode not in self._available_modes:
             saved_mode = next(iter(self._available_modes), "compact")
         self._mode_combo.setCurrentIndex(self._MODE_REVERSE.get(saved_mode, 0))
         self._set_mode(saved_mode)
         self._set_mmr_mode(self.app.config.get("mmr_display_mode", "both"))
+        self._ctrl_active = self.app.config.get("controller_overlay_enabled", False)
+        self._update_ctrl_btn_style()
+        self._set_ctrl_mode(
+            self.app.config.get("controller_overlay_mode", "with_bg"), save=False)
+
+    def _toggle_controller(self):
+        self._ctrl_active = not self._ctrl_active
+        self.app.config["controller_overlay_enabled"] = self._ctrl_active
+        self.app.config.save()
+        if self._ctrl_active:
+            self.app.controller_overlay.show()
+        else:
+            self.app.controller_overlay.hide()
+        self._update_ctrl_btn_style()
+
+    def _update_ctrl_btn_style(self):
+        if self._ctrl_active:
+            self._ctrl_toggle_btn.setText("🎮  DÉSACTIVER L'OVERLAY MANETTE")
+            self._ctrl_toggle_btn.setStyleSheet(f"""
+                QPushButton{{background:{C_ORG};color:{C_TEXT};border:none;border-radius:4px;
+                             padding:5px 12px;font-size:11px;font-weight:700;}}
+                QPushButton:hover{{background:#e06000;}}""")
+        else:
+            self._ctrl_toggle_btn.setText("🎮  ACTIVER L'OVERLAY MANETTE")
+            self._ctrl_toggle_btn.setStyleSheet(f"""
+                QPushButton{{background:{C_BG3};color:{C_TEXT};border:none;border-radius:4px;
+                             padding:5px 12px;font-size:11px;font-weight:700;}}
+                QPushButton:hover{{background:{C_BG3}cc;}}""")
+
+    def _set_ctrl_mode(self, mode, save=True):
+        self.app.controller_overlay.set_mode(mode)
+        if save:
+            self.app.config["controller_overlay_mode"] = mode
+            self.app.config.save()
+        for m, b in self._ctrl_style_btns.items():
+            active = m == mode
+            b.setStyleSheet(
+                f"QPushButton{{background:{C_BLUE if active else C_BG3};"
+                f"color:{C_TEXT if active else C_MUTE};border:none;border-radius:4px;"
+                f"padding:5px 12px;font-size:10px;font-weight:700;}}"
+                + ("" if active else f"QPushButton:hover{{color:{C_TEXT};}}")
+            )
 
     def _reconfigure_hotkey(self):
         dlg = OverlayBindDialog(self.window())
@@ -1214,7 +1347,7 @@ class KeyCaptureWidget(QWidget):
         self._display.setFixedWidth(140)
         self._display.setStyleSheet(
             f"background:{C_BG3};color:{C_TEXT};border-radius:4px;"
-            f"padding:5px 9px;font-size:11px;border:1px solid {C_BG3};")
+            f"padding:5px 9px;font-size:11px;border:none;")
 
         self._rec_btn = QPushButton("🎯  Enregistrer")
         self._rec_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -1480,7 +1613,10 @@ class SoundTab(QWidget):
         save_btn = btn("💾  Sauvegarder", bg=C_BLUE, fg=C_TEXT, size=10)
         save_btn.clicked.connect(self.app.config.save)
         root.addWidget(save_btn)
-        root.addStretch()
+        root.addStretch(1)
+
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
 
     def _browse(self, field, cfg_key):
         from PyQt6.QtWidgets import QFileDialog
@@ -2348,8 +2484,8 @@ class MMRService:
 class MainApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("BakkesMod v2")
-        self.setFixedWidth(440)
+        self.setWindowTitle("BakkyTrack")
+        self.setFixedWidth(468)
         self.setMinimumHeight(660)
 
         self.config  = Config()
@@ -2364,6 +2500,11 @@ class MainApp(QMainWindow):
         self.players_overlay_win = PlayersOverlayWindow()
         self.result_overlay      = ResultOverlay()
         self.ingame_mmr_overlay  = InGameMMROverlay()
+        self.controller_overlay  = ControllerOverlay(
+            self.config.get("controller_overlay_mode", "with_bg")
+        )
+        if self.config.get("controller_overlay_enabled", False):
+            self.controller_overlay.show()
         self._ingame_stats_cache: dict = {}
         self._overlay_hold_active = False
 
@@ -2387,12 +2528,38 @@ class MainApp(QMainWindow):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet("background:transparent;border:none;")
 
-        tabs.addTab(scroll,              "📊 TRACKER")
-        tabs.addTab(self.players_tab,    "👥 JOUEURS")
-        tabs.addTab(self.overlay_tab,    "🖥 OVERLAY")
-        tabs.addTab(self.auto_tab,       "⚡ AUTO")
-        tabs.addTab(self.sound_tab,      "🔊 SONS")
-        tabs.addTab(self.settings_tab,   "⚙ PARAMS")
+        sound_scroll = QScrollArea()
+        sound_scroll.setWidget(self.sound_tab)
+        sound_scroll.setWidgetResizable(True)
+        sound_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        sound_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        sound_scroll.setStyleSheet("background:transparent;border:none;")
+
+        tabs.addTab(scroll,              "📊  Stats")
+        tabs.addTab(self.players_tab,    "👥  Match")
+        tabs.addTab(self.overlay_tab,    "🖥  Overlay")
+        tabs.addTab(self.auto_tab,       "⚡  Auto")
+        tabs.addTab(sound_scroll,        "🔊  Sons")
+        tabs.addTab(self.settings_tab,   "⚙  Options")
+        tabs.setTabToolTip(
+            0, "Connexion au serveur StatsAPI (même port que dans le plugin en jeu), "
+               "MMR tracker.gg, playlists ranked, victoires / défaites et taux de victoire.")
+        tabs.setTabToolTip(
+            1, "Liste des joueurs du match en cours et ouverture du profil sur "
+               "tracker.network.")
+        tabs.setTabToolTip(
+            2, "Barre d’informations en jeu : apparence, raccourcis clavier / manette, "
+               "aperçu et overlay MMR pendant la partie.")
+        tabs.setTabToolTip(
+            3, "Automatisations : passer les replays, relancer la file, lancer la freeplay "
+               "(nécessite pyautogui et des raccourcis configurés).")
+        tabs.setTabToolTip(
+            4, "Jouer un son sur but, démo, arrêt décisif, etc., selon les événements "
+               "reçus de StatsAPI.")
+        tabs.setTabToolTip(
+            5, "Plateforme Epic / Steam, pseudo tracker.gg, ports, thème d’arrière-plan "
+               "et réglages avancés.")
         self._bg_widget.add_widget(tabs)
         self.setCentralWidget(self._bg_widget)
 
@@ -2677,7 +2844,7 @@ class MainApp(QMainWindow):
             btn = self.config.get("overlay_hotkey_controller_btn", 0)
             if btn == 0:
                 return False
-            xi = _get_xinput_state()
+            xi = get_gamepad_state()
             return bool(xi and (xi.Gamepad.wButtons & btn) == btn)
         else:
             key = self.config.get("overlay_hotkey_key", "key:tab")
@@ -2749,7 +2916,8 @@ class MainApp(QMainWindow):
 
         # 4. Fermeture propre de toutes les fenêtres overlay
         for w in (self.overlay_win, self.players_overlay_win,
-                  self.result_overlay, self.ingame_mmr_overlay):
+                  self.result_overlay, self.ingame_mmr_overlay,
+                  self.controller_overlay):
             try:
                 w.close()
             except Exception:
@@ -2936,7 +3104,7 @@ def main():
     win.show()
     win.raise_()                 # amène au premier plan
     win.activateWindow()         # donne le focus clavier
-    sys.exit(app.exec())    ,
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
