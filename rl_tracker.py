@@ -107,6 +107,7 @@ DEFAULT_CONFIG = {
     "overlay_hotkey_type":           "key",   # "key" | "controller"
     "overlay_hotkey_key":            "key:tab",
     "overlay_hotkey_controller_btn": 0,
+    "tab_rank_mode":                 "2v2",   # "1v1" | "2v2" | "3v3" | "best"
     # Overlay manette
     "controller_overlay_enabled":    False,
     "controller_overlay_mode":       "with_bg",   # "with_bg" | "transparent"
@@ -512,6 +513,19 @@ def _fetch_player_for_ingame(primary_id: str, display_name: str, cache: dict):
                     "tier_name": tier_name,
                     "tier_id":   tier_id,
                 }
+
+            # Peak MMR par playlist (segments type "peak-rating")
+            for seg in data["data"].get("segments", []):
+                if seg.get("type") != "peak-rating":
+                    continue
+                pid_val  = seg.get("attributes", {}).get("playlistId")
+                peak_val = seg.get("stats", {}).get("peakRating", {}).get("value")
+                if pid_val is not None and peak_val:
+                    if pid_val in playlists:
+                        playlists[pid_val]["peak_mmr"] = int(peak_val)
+                    else:
+                        playlists[pid_val] = {"mmr": 0, "tier_name": "Unranked",
+                                              "tier_id": 0, "peak_mmr": int(peak_val)}
 
             cache[primary_id] = {
                 "status":    "ok",
@@ -1110,6 +1124,52 @@ class OverlayTab(QWidget):
         hk_row.addWidget(self._hk_display); hk_row.addWidget(hk_bind_btn); hk_row.addStretch()
         hkl.addLayout(hk_row)
         root.addWidget(hk_card)
+
+        # ── Mode de rang affiché dans l'overlay Tab ───────────────────────
+        rm_card = card()
+        rml = QVBoxLayout(rm_card); rml.setContentsMargins(16,14,16,16); rml.setSpacing(10)
+        rml.addWidget(lbl("RANG AFFICHÉ DANS L'OVERLAY TAB", C_MUTE, 9))
+        rml.addWidget(lbl(
+            "Choisit quel rang / MMR est affiché pour chaque joueur.\n"
+            "« BEST » affiche le mode ranked où le joueur a le MMR le plus élevé.\n"
+            "Le peak MMR all-time apparaît entre parenthèses sous le pseudo.",
+            C_TEXT, 9))
+
+        rm_btn_row = QHBoxLayout(); rm_btn_row.setSpacing(6)
+        _RM_OPTS = [("1V1", "1v1"), ("2V2", "2v2"), ("3V3", "3v3"), ("BEST", "best")]
+        self._rm_btns = {}
+
+        def _make_rm_btn(label, key):
+            b = QPushButton(label)
+            b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            b.setCheckable(True)
+            b.setFixedHeight(30)
+            def _style(active):
+                bg = C_BLUE if active else C_BG3
+                b.setStyleSheet(
+                    f"QPushButton{{background:{bg};color:{C_TEXT};border:none;"
+                    f"border-radius:4px;font-size:10px;font-weight:700;padding:0 12px;}}"
+                    f"QPushButton:hover{{background:{C_BLUE if not active else C_BLUE}cc;}}")
+            b.setChecked(self.app.config.get("tab_rank_mode", "2v2") == key)
+            _style(b.isChecked())
+            def _on_click(checked, k=key, btn_ref=b, style_fn=_style):
+                self.app.config["tab_rank_mode"] = k
+                for other_key, other_btn in self._rm_btns.items():
+                    other_btn.setChecked(other_key == k)
+                    _style_fn = getattr(other_btn, "_style_fn", None)
+                    if _style_fn: _style_fn(other_key == k)
+                style_fn(True)
+            b._style_fn = _style
+            b.clicked.connect(_on_click)
+            return b
+
+        for lbl_txt, key in _RM_OPTS:
+            b = _make_rm_btn(lbl_txt, key)
+            self._rm_btns[key] = b
+            rm_btn_row.addWidget(b)
+        rm_btn_row.addStretch()
+        rml.addLayout(rm_btn_row)
+        root.addWidget(rm_card)
 
         # ── Toggle overlay principal ──────────────────────────────────────
         tog_card = card()
@@ -3130,6 +3190,7 @@ class MainApp(QMainWindow):
             self.match.current_players,
             self._ingame_stats_cache,
             self.mmr.selected_playlist,
+            rank_mode=self.config.get("tab_rank_mode", "2v2"),
         )
 
     # ── Overlay hold-to-show loop ─────────────────────────────────────────
@@ -3187,6 +3248,7 @@ class MainApp(QMainWindow):
                 self.match.current_players,
                 self._ingame_stats_cache,
                 self.mmr.selected_playlist,
+                rank_mode=self.config.get("tab_rank_mode", "2v2"),
             )
             self.ingame_mmr_overlay.show()
 
