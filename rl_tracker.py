@@ -2678,7 +2678,7 @@ class MMRService:
                     with urllib.request.urlopen(req, context=ssl_ctx, timeout=10) as resp:
                         raw = resp.read().decode("utf-8")
                 except Exception:
-                    with urllib.request.urlopen(req, context=_SSL_CTX_NOVERIFY, timeout=10) as resp:
+                    with urllib.request.urlopen(req, timeout=10) as resp:
                         raw = resp.read().decode("utf-8")
                 data = json.loads(raw)
 
