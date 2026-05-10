@@ -2491,8 +2491,9 @@ class InGameMMROverlay(QMainWindow):
     """Overlay affiché en maintenant Tab : montre le MMR de chaque joueur
     pour la playlist actuellement sélectionnée (1v1 / 2v2 / 3v3)."""
 
-    _PLAYLIST_NAMES = {"1v1": "1V1", "2v2": "2V2", "3v3": "3V3"}
+    _PLAYLIST_NAMES = {"1v1": "1V1", "2v2": "2V2", "3v3": "3V3", "best": "BEST"}
     _PLAYLIST_IDS   = {"1v1": 10,    "2v2": 11,    "3v3": 13}
+    _RANKED_PL_IDS  = [10, 11, 13]   # used when rank_mode == "best"
 
     def __init__(self):
         super().__init__()
@@ -2509,6 +2510,7 @@ class InGameMMROverlay(QMainWindow):
         self._players      = []
         self._stats        = {}   # primary_id → {status, playlists}
         self._playlist_key = "2v2"
+        self._rank_mode    = "2v2"   # "1v1" | "2v2" | "3v3" | "best"
         self._drag_pos     = None
 
         cont = QWidget()
@@ -2612,16 +2614,42 @@ class InGameMMROverlay(QMainWindow):
         self._refresh_timer.stop()
 
     # ── Données ───────────────────────────────────────────────────────────
-    def set_data(self, players: list, stats: dict, playlist_key: str):
+    def set_data(self, players: list, stats: dict, playlist_key: str,
+                 rank_mode: str = ""):
         """Appelée par MainApp pour injecter les joueurs et les stats.
         Ne reconstruit pas les widgets directement — le _refresh_timer s'en charge
-        toutes les 600 ms quand l'overlay est visible (évite le double-rebuild)."""
+        toutes les 600 ms quand l'overlay est visible (évite le double-rebuild).
+
+        rank_mode : "1v1" | "2v2" | "3v3" | "best"  (vide = utilise playlist_key)
+        """
         self._players      = players
         self._stats        = stats
         self._playlist_key = playlist_key
+        if rank_mode:
+            self._rank_mode = rank_mode
 
     def _pl_id(self) -> int:
-        return self._PLAYLIST_IDS.get(self._playlist_key, 11)
+        return self._PLAYLIST_IDS.get(self._rank_mode, 11)
+
+    def _best_playlist_stats(self, playlists: dict):
+        """Retourne (pl_id, stats_dict) du mode ranked avec le RANG le plus élevé.
+        En cas d'égalité de tier, on départage par MMR."""
+        best_id    = None
+        best_stats = None
+        best_tier  = -1
+        best_mmr   = -1
+        for pid in self._RANKED_PL_IDS:
+            s = playlists.get(pid)
+            if not s:
+                continue
+            t = s.get("tier_id", 0)
+            m = s.get("mmr", 0)
+            if t > best_tier or (t == best_tier and m > best_mmr):
+                best_tier  = t
+                best_mmr   = m
+                best_id    = pid
+                best_stats = s
+        return best_id, best_stats
 
     # ── Reconstruction de la liste ────────────────────────────────────────
     def _clear(self):
@@ -2632,7 +2660,8 @@ class InGameMMROverlay(QMainWindow):
 
     def _rebuild_rows(self):
         self._clear()
-        pl_name = self._PLAYLIST_NAMES.get(self._playlist_key, "??")
+        mode     = self._rank_mode
+        pl_name  = self._PLAYLIST_NAMES.get(mode, "??")
         self._title_lbl.setText(f"MMR  {pl_name}  — EN JEU")
 
         if not self._players:
@@ -2644,7 +2673,6 @@ class InGameMMROverlay(QMainWindow):
             self.adjustSize()
             return
 
-        pl_id          = self._pl_id()
         blues          = [p for p in self._players if p.get("TeamNum") == 0]
         oranges        = [p for p in self._players if p.get("TeamNum") == 1]
         loading_count  = 0
@@ -2683,7 +2711,18 @@ class InGameMMROverlay(QMainWindow):
                 icon_lbl.setStyleSheet("background:transparent;")
 
                 if status == "ok":
-                    pl_stats = entry.get("playlists", {}).get(pl_id)
+                    all_pls = entry.get("playlists", {})
+
+                    # Sélection du mode d'affichage
+                    _PL_TAGS = {10: "1V1", 11: "2V2", 13: "3V3"}
+                    if mode == "best":
+                        best_pl_id, pl_stats = self._best_playlist_stats(all_pls)
+                        pl_tag = _PL_TAGS.get(best_pl_id, "")
+                    else:
+                        pl_id    = self._PLAYLIST_IDS.get(mode, 11)
+                        pl_stats = all_pls.get(pl_id)
+                        pl_tag   = _PL_TAGS.get(pl_id, "")
+
                     if pl_stats:
                         tier_id   = pl_stats.get("tier_id", 0)
                         mmr_val   = pl_stats.get("mmr", 0)
@@ -2693,24 +2732,30 @@ class InGameMMROverlay(QMainWindow):
                             icon_lbl.setPixmap(pm)
                         else:
                             icon_lbl.setText("?")
-                        mmr_str   = str(mmr_val) if mmr_val else "--"
+                        mmr_str      = str(mmr_val) if mmr_val else "--"
+                        # Peak MMR du mode affiché uniquement
+                        overall_peak = pl_stats.get("peak_mmr")
                         rank_str  = rank_name
                         mmr_color = C_GOLD
                     else:
                         pm = get_rank_pixmap(0, 30)
                         if pm: icon_lbl.setPixmap(pm)
-                        mmr_str   = "--"
-                        rank_str  = "Non classé"
-                        mmr_color = C_MUTE
+                        mmr_str      = "--"
+                        rank_str     = "Non classé"
+                        mmr_color    = C_MUTE
+                        overall_peak = None
+                        pl_tag       = ""
 
                 elif status == "loading":
                     loading_count += 1
                     icon_lbl.setText("⋯")
                     icon_lbl.setStyleSheet(
                         f"color:{C_MUTE};font-size:16px;background:transparent;")
-                    mmr_str   = "Chargement…"
-                    rank_str  = ""
-                    mmr_color = C_MUTE
+                    mmr_str      = "Chargement…"
+                    rank_str     = ""
+                    mmr_color    = C_MUTE
+                    overall_peak = None
+                    pl_tag       = ""
 
                 elif status == "error":
                     http_code = entry.get("http_code", 0) if entry else 0
@@ -2732,40 +2777,69 @@ class InGameMMROverlay(QMainWindow):
                         icon_lbl.setText("✕")
                         icon_lbl.setStyleSheet(
                             f"color:{C_ORG};font-size:11px;background:transparent;")
-                    rank_str  = ""
+                    rank_str     = ""
+                    overall_peak = None
+                    pl_tag       = ""
 
                 else:  # bot / pas de PID
                     icon_lbl.setText("🤖")
-                    mmr_str   = "BOT"
-                    rank_str  = ""
-                    mmr_color = C_MUTE
+                    mmr_str      = "BOT"
+                    rank_str     = ""
+                    mmr_color    = C_MUTE
+                    overall_peak = None
+                    pl_tag       = ""
 
                 row_lay.addWidget(icon_lbl)
 
-                # ── MMR ───────────────────────────────────────────────────
+                # ── Colonne MMR : nombre + tag playlist dessous ───────────
+                mmr_col = QWidget()
+                mmr_col.setStyleSheet("background:transparent;")
+                mmr_col.setFixedWidth(76)
+                mmr_col_lay = QVBoxLayout(mmr_col)
+                mmr_col_lay.setContentsMargins(0, 0, 0, 0)
+                mmr_col_lay.setSpacing(0)
+
                 mmr_lbl = QLabel(mmr_str)
-                mmr_lbl.setFixedWidth(86)
                 mmr_lbl.setStyleSheet(
                     f"color:{mmr_color};font-size:16px;font-weight:800;"
                     f"background:transparent;")
-                row_lay.addWidget(mmr_lbl)
+                mmr_col_lay.addWidget(mmr_lbl)
 
-                # ── Nom + rang ─────────────────────────────────────────────
+                if pl_tag:
+                    tag_lbl = QLabel(pl_tag)
+                    tag_lbl.setStyleSheet(
+                        f"color:{C_BLUE};font-size:8px;font-weight:700;"
+                        f"letter-spacing:1px;background:transparent;")
+                    mmr_col_lay.addWidget(tag_lbl)
+
+                row_lay.addWidget(mmr_col)
+
+                # ── Colonne Info : pseudo / rang / peak ───────────────────
                 info_w = QWidget()
                 info_w.setStyleSheet("background:transparent;")
                 info_lay = QVBoxLayout(info_w)
                 info_lay.setContentsMargins(0, 0, 0, 0)
                 info_lay.setSpacing(1)
+
                 name_lbl = QLabel(name)
                 name_lbl.setStyleSheet(
                     f"color:{team_color};font-size:13px;font-weight:700;"
                     f"background:transparent;")
                 info_lay.addWidget(name_lbl)
+
                 if rank_str:
                     rl = QLabel(rank_str)
                     rl.setStyleSheet(
-                        f"color:{C_MUTE};font-size:8px;background:transparent;")
+                        f"color:{C_MUTE};font-size:9px;background:transparent;")
                     info_lay.addWidget(rl)
+
+                if overall_peak:
+                    pk_lbl = QLabel(f"⬆ {overall_peak}  pk all-time")
+                    pk_lbl.setStyleSheet(
+                        f"color:#c8a820;font-size:9px;font-weight:600;"
+                        f"background:transparent;")
+                    info_lay.addWidget(pk_lbl)
+
                 row_lay.addWidget(info_w, 1)
 
                 self._plist.addWidget(row_w)
