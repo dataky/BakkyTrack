@@ -2485,15 +2485,33 @@ class PlayersOverlayWindow(QMainWindow):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  IN-GAME MMR OVERLAY  (maintien Tab → MMR de tous les joueurs du match)
+#  IN-GAME MMR OVERLAY  (maintien Tab → texte superposé sur le scoreboard RL)
+#  Overlay 100 % transparent — affiche uniquement [MMR] peak[MMR] pour chaque
+#  joueur, positionné exactement sur les lignes du menu Tab natif de RL.
+#  BLEU en haut, ORANGE en bas. Tri par Score décroissant.
 # ─────────────────────────────────────────────────────────────────────────────
 class InGameMMROverlay(QMainWindow):
-    """Overlay affiché en maintenant Tab : montre le MMR de chaque joueur
-    pour la playlist actuellement sélectionnée (1v1 / 2v2 / 3v3)."""
+    """Overlay Tab minimaliste : texte [MMR] peak[MMR] superposé sur le
+    scoreboard natif de Rocket League. Fond 100 % transparent, sans chrome."""
 
-    _PLAYLIST_NAMES = {"1v1": "1V1", "2v2": "2V2", "3v3": "3V3", "best": "BEST"}
-    _PLAYLIST_IDS   = {"1v1": 10,    "2v2": 11,    "3v3": 13}
-    _RANKED_PL_IDS  = [10, 11, 13]   # used when rank_mode == "best"
+
+    _PLAYLIST_IDS  = {"1v1": 10, "2v2": 11, "3v3": 13}
+    _RANKED_PL_IDS = [10, 11, 13]
+
+    # ── Positions proportionnelles au scoreboard Tab de RL ────────────────────
+    # _Y_ORG0 est stable quel que soit le mode (1v1 / 2v2 / 3v3).
+    # _Y_BLUE0 est calculé dynamiquement dans _rebuild depuis _Y_ORG0 et le
+    # nombre de joueurs bleus : le header orange est toujours à la même hauteur,
+    # mais la 1ʳᵉ ligne bleue monte selon le nombre de lignes.
+    #
+    # Calibrage de référence (2v2, 1920×1080) :
+    #   _Y_BLUE0_REF = 0.402  → utilisé pour dériver _ORANGE_HEADER_GAP
+    #   _Y_BLUE0_REF = _Y_ORG0 - (n_ref-1)*_ROW_H - _ORANGE_HEADER_GAP
+    #   avec n_ref=2  →  _ORANGE_HEADER_GAP = 0.590 - 0.402 - 0.055 = 0.133
+    _Y_ORG0            = 0.590   # 1ʳᵉ ligne équipe orange — ancre fixe
+    _ROW_H             = 0.055   # espacement entre lignes  (% hauteur écran)
+    _ORANGE_HEADER_GAP = 0.133   # espace entre dernière ligne bleue et 1ʳᵉ ligne orange
+    _X_TEXT            = 0.443   # position X du texte      (% largeur écran)
 
     def __init__(self):
         super().__init__()
@@ -2505,98 +2523,46 @@ class InGameMMROverlay(QMainWindow):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setFixedWidth(460)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
         self._players      = []
-        self._stats        = {}   # primary_id → {status, playlists}
+        self._stats        = {}
         self._playlist_key = "2v2"
-        self._rank_mode    = "2v2"   # "1v1" | "2v2" | "3v3" | "best"
-        self._drag_pos     = None
+        self._rank_mode    = "2v2"
+        self._show_peak    = True   # configurable depuis l'UI principale
+        self._game_state   = {}     # dernier Game{} de UpdateState (bReplay, etc.)
 
-        cont = QWidget()
-        cont.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setCentralWidget(cont)
+        self._container = QWidget(self)
+        self._container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._container.setStyleSheet("background:transparent;")
+        self.setCentralWidget(self._container)
 
-        outer = QVBoxLayout(cont)
-        outer.setContentsMargins(0, 0, 0, 0)
+        self._labels: list = []
 
-        self._card = _GlassCard()
-        card_lay = QVBoxLayout(self._card)
-        card_lay.setContentsMargins(16, 12, 16, 14)
-        card_lay.setSpacing(8)
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self._rebuild)
 
-        # ── Header ────────────────────────────────────────────────────────
-        hdr = QHBoxLayout()
-        self._title_lbl = QLabel("MMR  2V2  — EN JEU")
-        self._title_lbl.setStyleSheet(
-            f"color:{C_BLUE};font-size:9px;font-weight:700;"
-            f"letter-spacing:2px;background:transparent;")
-        self._status_lbl = QLabel("")
-        self._status_lbl.setStyleSheet(
-            f"color:{C_MUTE};font-size:8px;background:transparent;")
-        close_btn = QPushButton("✕")
-        close_btn.setFixedSize(16, 16)
-        close_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        close_btn.setStyleSheet(
-            f"QPushButton{{background:transparent;color:{C_MUTE};border:none;font-size:9px;}}"
-            f"QPushButton:hover{{color:{C_TEXT};}}")
-        close_btn.clicked.connect(self.hide)
-        hdr.addWidget(self._title_lbl)
-        hdr.addSpacing(8)
-        hdr.addWidget(self._status_lbl)
-        hdr.addStretch()
-        hdr.addWidget(close_btn)
-        card_lay.addLayout(hdr)
-
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setFixedHeight(1)
-        sep.setStyleSheet(f"background:{C_BG3};border:none;")
-        card_lay.addWidget(sep)
-
-        # ── Liste des joueurs ─────────────────────────────────────────────
-        self._players_w = QWidget()
-        self._players_w.setStyleSheet("background:transparent;")
-        self._plist = QVBoxLayout(self._players_w)
-        self._plist.setSpacing(2)
-        self._plist.setContentsMargins(0, 4, 0, 4)
-        card_lay.addWidget(self._players_w)
-
-        outer.addWidget(self._card)
-
-        # Drag via la carte
-        self._card.mousePressEvent  = self._mouse_press
-        self._card.mouseMoveEvent   = self._mouse_move
-
-        # Topmost
         self._top_timer = QTimer(self)
         self._top_timer.timeout.connect(self._enforce_topmost)
         self._top_timer.start(2000)
 
-        # Refresh interne — démarré seulement quand l'overlay est visible (voir showEvent/hideEvent)
-        # pour éviter de créer/détruire des QWidgets toutes les 600 ms en arrière-plan.
-        self._refresh_timer = QTimer(self)
-        self._refresh_timer.timeout.connect(self._rebuild_rows)
-
-    # ── Drag ──────────────────────────────────────────────────────────────
-    def _mouse_press(self, e):
-        if e.button() == Qt.MouseButton.LeftButton:
-            self._drag_pos = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
-
-    def _mouse_move(self, e):
-        if e.buttons() & Qt.MouseButton.LeftButton and self._drag_pos:
-            self.move(e.globalPosition().toPoint() - self._drag_pos)
-
-    # ── Topmost ───────────────────────────────────────────────────────────
+    # ── Cycle de vie ──────────────────────────────────────────────────────────
     def showEvent(self, e):
         super().showEvent(e)
-        # Démarre le timer de refresh uniquement quand l'overlay est visible
-        self._refresh_timer.start(600)
-        self._rebuild_rows()   # affichage immédiat à l'ouverture
+        screen = QApplication.primaryScreen().geometry()
+        self.setGeometry(screen)
+        self._container.setGeometry(0, 0, screen.width(), screen.height())
+        # Le refresh est piloté depuis rl_tracker (_do_overlay_refresh) :
+        # - appui simple → rebuild immédiat via _on_overlay_hold_start
+        # - maintien → timer 1s via _overlay_hold_refresh_timer
+        # On garde le timer interne comme sécurité (fallback lent)
+        self._refresh_timer.start(2000)
+        self._rebuild()
         self._enforce_topmost()
-        # Centrer en haut de l'écran au premier affichage
-        screen = QApplication.primaryScreen().availableGeometry()
-        self.move(screen.center().x() - self.width() // 2,
-                  screen.top() + int(screen.height() * 0.08))
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        self._refresh_timer.stop()
 
     def _enforce_topmost(self):
         if not self.isVisible():
@@ -2608,249 +2574,134 @@ class InGameMMROverlay(QMainWindow):
         except Exception:
             pass
 
-    def hideEvent(self, e):
-        """Arrête le timer de refresh quand l'overlay est caché — évite le churn de widgets."""
-        super().hideEvent(e)
-        self._refresh_timer.stop()
-
-    # ── Données ───────────────────────────────────────────────────────────
+    # ── API publique ──────────────────────────────────────────────────────────
+    # ── API publique ──────────────────────────────────────────────────────────
     def set_data(self, players: list, stats: dict, playlist_key: str,
-                 rank_mode: str = ""):
-        """Appelée par MainApp pour injecter les joueurs et les stats.
-        Ne reconstruit pas les widgets directement — le _refresh_timer s'en charge
-        toutes les 600 ms quand l'overlay est visible (évite le double-rebuild).
-
-        rank_mode : "1v1" | "2v2" | "3v3" | "best"  (vide = utilise playlist_key)
-        """
-        self._players      = players
-        self._stats        = stats
+                 rank_mode: str = "", game_state: dict = None):
+        """Met a jour les donnees pour l'overlay Tab."""
+        self._players      = players or []
+        self._stats        = stats or {}
         self._playlist_key = playlist_key
         if rank_mode:
             self._rank_mode = rank_mode
+        if game_state is not None:
+            self._game_state = game_state
 
-    def _pl_id(self) -> int:
-        return self._PLAYLIST_IDS.get(self._rank_mode, 11)
+    def set_show_peak(self, show: bool):
+        """Active ou désactive l'affichage du peak MMR dans l'overlay Tab."""
+        self._show_peak = show
+        if self.isVisible():
+            self._rebuild()
 
+    # ── Helpers internes ──────────────────────────────────────────────────────
     def _best_playlist_stats(self, playlists: dict):
-        """Retourne (pl_id, stats_dict) du mode ranked avec le RANG le plus élevé.
-        En cas d'égalité de tier, on départage par MMR."""
-        best_id    = None
-        best_stats = None
-        best_tier  = -1
-        best_mmr   = -1
+        best_id = None; best_stats = None; best_tier = -1; best_mmr = -1
         for pid in self._RANKED_PL_IDS:
             s = playlists.get(pid)
             if not s:
                 continue
-            t = s.get("tier_id", 0)
-            m = s.get("mmr", 0)
+            t = s.get("tier_id", 0); m = s.get("mmr", 0)
             if t > best_tier or (t == best_tier and m > best_mmr):
-                best_tier  = t
-                best_mmr   = m
-                best_id    = pid
-                best_stats = s
+                best_tier = t; best_mmr = m; best_id = pid; best_stats = s
         return best_id, best_stats
 
-    # ── Reconstruction de la liste ────────────────────────────────────────
-    def _clear(self):
-        while self._plist.count():
-            item = self._plist.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+    def _player_html(self, p: dict, mmr_px: int, peak_px: int) -> str:
+        """Retourne du HTML riche : [MMR] en grand, peak[MMR] en plus petit.
+        Retourne '' si les données sont indisponibles (bot, etc.)."""
+        pid   = p.get("PrimaryId", "")
+        entry = self._stats.get(pid) if pid else None
+        status = entry.get("status", "loading") if entry else (
+            "bot" if not pid else "loading")
 
-    def _rebuild_rows(self):
-        self._clear()
-        mode     = self._rank_mode
-        pl_name  = self._PLAYLIST_NAMES.get(mode, "??")
-        self._title_lbl.setText(f"MMR  {pl_name}  — EN JEU")
+        # Police condensée et grasse proche du style RL natif
+        _font = "'Rajdhani','Segoe UI Semibold','Arial Narrow',Arial,sans-serif"
+        mmr_style  = (f"font-size:{mmr_px}px;font-weight:800;letter-spacing:0.5px;"
+                      f"color:white;font-family:{_font};"
+                      f"text-shadow:0 1px 4px rgba(0,0,0,0.9);")
+        peak_style = (f"font-size:{peak_px}px;font-weight:600;letter-spacing:0.3px;"
+                      f"color:#FFD700;font-family:{_font};"
+                      f"text-shadow:0 1px 3px rgba(0,0,0,0.8);")
+        mute_style = (f"font-size:{mmr_px}px;font-weight:700;letter-spacing:0.5px;"
+                      f"color:rgba(200,200,200,0.6);font-family:{_font};"
+                      f"text-shadow:0 1px 3px rgba(0,0,0,0.7);")
+
+        if status == "ok":
+            all_pls = entry.get("playlists", {})
+            mode    = self._rank_mode
+            if mode == "best":
+                _, pl_stats = self._best_playlist_stats(all_pls)
+            else:
+                pl_stats = all_pls.get(self._PLAYLIST_IDS.get(mode, 11))
+            if pl_stats:
+                mmr  = pl_stats.get("mmr", 0)
+                peak = pl_stats.get("peak_mmr")
+                if mmr:
+                    html = f'<span style="{mmr_style}">[{mmr}]</span>'
+                    if peak and self._show_peak:
+                        html += f'&nbsp;<span style="{peak_style}">peak[{peak}]</span>'
+                    return html
+            return f'<span style="{mute_style}">[--]</span>'
+
+        if status == "loading":
+            return f'<span style="{mute_style}">[…]</span>'
+        if status == "error":
+            http = entry.get("http_code", 0) if entry else 0
+            sym  = "🔒" if http == 403 else "?"
+            return f'<span style="{mute_style}">[{sym}]</span>'
+        return ""   # bot → rien
+
+    # ── Construction des labels ───────────────────────────────────────────────
+    def _rebuild(self):
+        """Recree les labels texte aux bonnes positions sur le scoreboard RL.
+        Tri par Score descendant + PrimaryId comme tiebreaker stable.
+        Les scores sont figés pendant les replays donc l'ordre reste cohérent."""
+        for lbl_w in self._labels:
+            lbl_w.deleteLater()
+        self._labels.clear()
 
         if not self._players:
-            e = QLabel("En attente d'un match…")
-            e.setStyleSheet(
-                f"color:{C_MUTE};font-size:10px;background:transparent;")
-            e.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self._plist.addWidget(e)
-            self.adjustSize()
             return
 
-        blues          = [p for p in self._players if p.get("TeamNum") == 0]
-        oranges        = [p for p in self._players if p.get("TeamNum") == 1]
-        loading_count  = 0
+        screen = QApplication.primaryScreen().geometry()
+        sw, sh = screen.width(), screen.height()
 
-        for team_label, team_color, team_players in [
-            ("🔵  BLUE",   C_BLUE, blues),
-            ("🟠  ORANGE", C_ORG,  oranges),
-        ]:
-            if not team_players:
-                continue
+        # Score descendant — stable en live ET en replay (scores figés pendant replay)
+        # PrimaryId en tiebreaker évite les sauts quand plusieurs joueurs sont à 0
+        sort_key = lambda p: (-p.get("Score", 0), p.get("PrimaryId", ""))
 
-            # Séparateur équipe
-            tl = QLabel(team_label)
-            tl.setStyleSheet(
-                f"color:{team_color};font-size:8px;font-weight:700;"
-                f"letter-spacing:1.5px;background:transparent;")
-            self._plist.addWidget(tl)
+        blues   = sorted([p for p in self._players if p.get("TeamNum") == 0],
+                         key=sort_key)
+        oranges = sorted([p for p in self._players if p.get("TeamNum") == 1],
+                         key=sort_key)
 
-            for p in team_players:
-                pid    = p.get("PrimaryId", "")
-                name   = p.get("Name", "?")
-                entry  = self._stats.get(pid) if pid else None
-                status = entry.get("status", "loading") if entry else ("bot" if not pid else "loading")
+        row_h    = int(sh * self._ROW_H)
+        x_text   = int(sw * self._X_TEXT)
+        mmr_px   = max(16, int(sh * 0.020))   # ~22 px sur 1080p
+        peak_px  = max(11, int(sh * 0.013))   # ~14 px sur 1080p
 
-                row_w = QWidget()
-                row_w.setStyleSheet(
-                    f"background:rgba(255,255,255,0.03);border-radius:4px;")
-                row_lay = QHBoxLayout(row_w)
-                row_lay.setContentsMargins(8, 4, 8, 4)
-                row_lay.setSpacing(10)
+        n_blues  = max(len(blues), 1)
+        y_blue0  = int(sh * (self._Y_ORG0
+                              - (n_blues - 1) * self._ROW_H
+                              - self._ORANGE_HEADER_GAP))
+        y_org0   = int(sh * self._Y_ORG0)
 
-                # ── Icône de rang ────────────────────────────────────────
-                icon_lbl = QLabel()
-                icon_lbl.setFixedSize(32, 32)
-                icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                icon_lbl.setStyleSheet("background:transparent;")
+        for team_players, y0 in [(blues, y_blue0), (oranges, y_org0)]:
+            for j, player in enumerate(team_players):
+                html = self._player_html(player, mmr_px, peak_px)
+                if not html:
+                    continue
+                y = y0 + j * row_h
 
-                if status == "ok":
-                    all_pls = entry.get("playlists", {})
-
-                    # Sélection du mode d'affichage
-                    _PL_TAGS = {10: "1V1", 11: "2V2", 13: "3V3"}
-                    if mode == "best":
-                        best_pl_id, pl_stats = self._best_playlist_stats(all_pls)
-                        pl_tag = _PL_TAGS.get(best_pl_id, "")
-                    else:
-                        pl_id    = self._PLAYLIST_IDS.get(mode, 11)
-                        pl_stats = all_pls.get(pl_id)
-                        pl_tag   = _PL_TAGS.get(pl_id, "")
-
-                    if pl_stats:
-                        tier_id   = pl_stats.get("tier_id", 0)
-                        mmr_val   = pl_stats.get("mmr", 0)
-                        rank_name = pl_stats.get("tier_name", "Unranked")
-                        pm = get_rank_pixmap(tier_id, 30)
-                        if pm:
-                            icon_lbl.setPixmap(pm)
-                        else:
-                            icon_lbl.setText("?")
-                        mmr_str      = str(mmr_val) if mmr_val else "--"
-                        # Peak MMR du mode affiché uniquement
-                        overall_peak = pl_stats.get("peak_mmr")
-                        rank_str  = rank_name
-                        mmr_color = C_GOLD
-                    else:
-                        pm = get_rank_pixmap(0, 30)
-                        if pm: icon_lbl.setPixmap(pm)
-                        mmr_str      = "--"
-                        rank_str     = "Non classé"
-                        mmr_color    = C_MUTE
-                        overall_peak = None
-                        pl_tag       = ""
-
-                elif status == "loading":
-                    loading_count += 1
-                    icon_lbl.setText("⋯")
-                    icon_lbl.setStyleSheet(
-                        f"color:{C_MUTE};font-size:16px;background:transparent;")
-                    mmr_str      = "Chargement…"
-                    rank_str     = ""
-                    mmr_color    = C_MUTE
-                    overall_peak = None
-                    pl_tag       = ""
-
-                elif status == "error":
-                    http_code = entry.get("http_code", 0) if entry else 0
-                    if http_code == 403:
-                        mmr_str   = "Privé 🔒"
-                        mmr_color = C_MUTE
-                        icon_lbl.setText("🔒")
-                        icon_lbl.setStyleSheet(
-                            f"color:{C_MUTE};font-size:13px;background:transparent;")
-                    elif http_code == 404:
-                        mmr_str   = "Introuvable"
-                        mmr_color = C_MUTE
-                        icon_lbl.setText("?")
-                        icon_lbl.setStyleSheet(
-                            f"color:{C_MUTE};font-size:14px;background:transparent;")
-                    else:
-                        mmr_str   = f"Err {http_code}" if http_code else "API Error"
-                        mmr_color = C_ORG
-                        icon_lbl.setText("✕")
-                        icon_lbl.setStyleSheet(
-                            f"color:{C_ORG};font-size:11px;background:transparent;")
-                    rank_str     = ""
-                    overall_peak = None
-                    pl_tag       = ""
-
-                else:  # bot / pas de PID
-                    icon_lbl.setText("🤖")
-                    mmr_str      = "BOT"
-                    rank_str     = ""
-                    mmr_color    = C_MUTE
-                    overall_peak = None
-                    pl_tag       = ""
-
-                row_lay.addWidget(icon_lbl)
-
-                # ── Colonne MMR : nombre + tag playlist dessous ───────────
-                mmr_col = QWidget()
-                mmr_col.setStyleSheet("background:transparent;")
-                mmr_col.setFixedWidth(76)
-                mmr_col_lay = QVBoxLayout(mmr_col)
-                mmr_col_lay.setContentsMargins(0, 0, 0, 0)
-                mmr_col_lay.setSpacing(0)
-
-                mmr_lbl = QLabel(mmr_str)
-                mmr_lbl.setStyleSheet(
-                    f"color:{mmr_color};font-size:16px;font-weight:800;"
-                    f"background:transparent;")
-                mmr_col_lay.addWidget(mmr_lbl)
-
-                if pl_tag:
-                    tag_lbl = QLabel(pl_tag)
-                    tag_lbl.setStyleSheet(
-                        f"color:{C_BLUE};font-size:8px;font-weight:700;"
-                        f"letter-spacing:1px;background:transparent;")
-                    mmr_col_lay.addWidget(tag_lbl)
-
-                row_lay.addWidget(mmr_col)
-
-                # ── Colonne Info : pseudo / rang / peak ───────────────────
-                info_w = QWidget()
-                info_w.setStyleSheet("background:transparent;")
-                info_lay = QVBoxLayout(info_w)
-                info_lay.setContentsMargins(0, 0, 0, 0)
-                info_lay.setSpacing(1)
-
-                name_lbl = QLabel(name)
-                name_lbl.setStyleSheet(
-                    f"color:{team_color};font-size:13px;font-weight:700;"
-                    f"background:transparent;")
-                info_lay.addWidget(name_lbl)
-
-                if rank_str:
-                    rl = QLabel(rank_str)
-                    rl.setStyleSheet(
-                        f"color:{C_MUTE};font-size:9px;background:transparent;")
-                    info_lay.addWidget(rl)
-
-                if overall_peak:
-                    pk_lbl = QLabel(f"⬆ {overall_peak}  pk all-time")
-                    pk_lbl.setStyleSheet(
-                        f"color:#c8a820;font-size:9px;font-weight:600;"
-                        f"background:transparent;")
-                    info_lay.addWidget(pk_lbl)
-
-                row_lay.addWidget(info_w, 1)
-
-                self._plist.addWidget(row_w)
-
-        # Statut global
-        if loading_count > 0:
-            self._status_lbl.setText(f"⟳ {loading_count} joueur(s)…")
-        else:
-            self._status_lbl.setText("✓")
-
-        self.adjustSize()
+                lbl_w = QLabel(self._container)
+                lbl_w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+                lbl_w.setTextFormat(Qt.TextFormat.RichText)
+                lbl_w.setText(html)
+                lbl_w.setStyleSheet("background:transparent;")
+                lbl_w.adjustSize()
+                # Bord droit du texte ancre sur x_text
+                lbl_w.move(x_text - lbl_w.width(), y - lbl_w.height() // 2)
+                lbl_w.show()
+                self._labels.append(lbl_w)
 
 
 # ── VK key map pour le hotkey listener ──────────────────────────────────────
