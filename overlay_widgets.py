@@ -73,6 +73,49 @@ def get_rank_pixmap(tier_id: int, size: int = 40):
     _rank_pixmap_cache[key] = None
     return None
 
+# ── Playlist icon helpers ─────────────────────────────────────────────────────
+_PLAYLIST_FOLDER = os.path.join(BASE_DIR, "Playlist")
+_playlist_pixmap_cache: dict = {}
+
+# Correspondance playlist_key → index de fichier dans le dossier Playlist/
+# (0.png=1v1, 1.png=2v2, 2.png=3v3, 3.png=hoops,
+#  4.png=rumble, 5.png=dropshot, 6.png=snowday, 7.png=tournament)
+_PLAYLIST_FILE_INDEX = {
+    "1v1":        0,
+    "2v2":        1,
+    "3v3":        2,
+    "hoops":      3,
+    "rumble":     4,
+    "dropshot":   5,
+    "snowday":    6,
+    "tournament": 7,
+}
+# Playlist ID (API) → clé texte
+_PLAYLIST_ID_TO_KEY = {10: "1v1", 11: "2v2", 13: "3v3"}
+
+def get_playlist_pixmap(playlist_key, size: int = 28):
+    """Charge et met en cache l'icône de playlist depuis le dossier 'Playlist'.
+    playlist_key : "1v1", "2v2", "3v3", "hoops", "rumble", etc.
+    Retourne un QPixmap ou None si le fichier est introuvable.
+    """
+    from PyQt6.QtGui import QPixmap
+    file_idx = _PLAYLIST_FILE_INDEX.get(playlist_key, 2)
+    key = (file_idx, size)
+    if key in _playlist_pixmap_cache:
+        return _playlist_pixmap_cache[key]
+    path = os.path.join(_PLAYLIST_FOLDER, f"{file_idx}.png")
+    if os.path.exists(path):
+        pm = QPixmap(path)
+        if not pm.isNull():
+            scaled = pm.scaled(size, size,
+                               Qt.AspectRatioMode.KeepAspectRatio,
+                               Qt.TransformationMode.SmoothTransformation)
+            _playlist_pixmap_cache[key] = scaled
+            return scaled
+    _playlist_pixmap_cache[key] = None
+    return None
+
+
 # ── Helpers UI ────────────────────────────────────────────────────────────────
 def card(parent=None, bg=C_BG2):
     f = QFrame(parent)
@@ -2511,7 +2554,9 @@ class InGameMMROverlay(QMainWindow):
     _Y_ORG0            = 0.590   # 1ʳᵉ ligne équipe orange — ancre fixe
     _ROW_H             = 0.055   # espacement entre lignes  (% hauteur écran)
     _ORANGE_HEADER_GAP = 0.133   # espace entre dernière ligne bleue et 1ʳᵉ ligne orange
-    _X_TEXT            = 0.443   # position X du texte      (% largeur écran)
+    _X_TEXT            = 0.443   # position X du texte MMR  (% largeur écran)
+    _X_RANK_ICON       = 0.188   # position X centre icône de rang    (% largeur)
+    _X_PLAYLIST_ICON   = 0.160   # position X centre icône de playlist (% largeur)
 
     def __init__(self):
         super().__init__()
@@ -2605,6 +2650,25 @@ class InGameMMROverlay(QMainWindow):
                 best_tier = t; best_mmr = m; best_id = pid; best_stats = s
         return best_id, best_stats
 
+    def _player_rank_tier(self, p: dict):
+        """Retourne (tier_id, playlist_key) pour un joueur.
+        Retourne (0, None) si les données sont indisponibles (bot, chargement…)."""
+        pid   = p.get("PrimaryId", "")
+        entry = self._stats.get(pid) if pid else None
+        if not entry or entry.get("status") != "ok":
+            return 0, None
+        all_pls = entry.get("playlists", {})
+        mode    = self._rank_mode
+        if mode == "best":
+            pl_id, pl_stats = self._best_playlist_stats(all_pls)
+            pl_key = _PLAYLIST_ID_TO_KEY.get(pl_id, "2v2") if pl_id else None
+        else:
+            pl_key  = mode
+            pl_stats = all_pls.get(self._PLAYLIST_IDS.get(mode, 11))
+        if not pl_stats:
+            return 0, pl_key
+        return pl_stats.get("tier_id", 0), pl_key
+
     def _player_html(self, p: dict, mmr_px: int, peak_px: int) -> str:
         """Retourne du HTML riche : [MMR] en grand, peak[MMR] en plus petit.
         Retourne '' si les données sont indisponibles (bot, etc.)."""
@@ -2678,6 +2742,8 @@ class InGameMMROverlay(QMainWindow):
         x_text   = int(sw * self._X_TEXT)
         mmr_px   = max(16, int(sh * 0.020))   # ~22 px sur 1080p
         peak_px  = max(11, int(sh * 0.013))   # ~14 px sur 1080p
+        icon_sz  = max(26, int(sh * 0.070))   # ~76 px sur 1080p (rang)
+        pl_sz    = max(16, int(sh * 0.040))   # ~43 px sur 1080p (playlist)
 
         n_blues  = max(len(blues), 1)
         y_blue0  = int(sh * (self._Y_ORG0
@@ -2685,23 +2751,57 @@ class InGameMMROverlay(QMainWindow):
                               - self._ORANGE_HEADER_GAP))
         y_org0   = int(sh * self._Y_ORG0)
 
+        x_rank     = int(sw * self._X_RANK_ICON)
+        x_playlist = int(sw * self._X_PLAYLIST_ICON)
+
         for team_players, y0 in [(blues, y_blue0), (oranges, y_org0)]:
             for j, player in enumerate(team_players):
                 html = self._player_html(player, mmr_px, peak_px)
-                if not html:
-                    continue
-                y = y0 + j * row_h
+                y    = y0 + j * row_h
 
-                lbl_w = QLabel(self._container)
-                lbl_w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-                lbl_w.setTextFormat(Qt.TextFormat.RichText)
-                lbl_w.setText(html)
-                lbl_w.setStyleSheet("background:transparent;")
-                lbl_w.adjustSize()
-                # Bord droit du texte ancre sur x_text
-                lbl_w.move(x_text - lbl_w.width(), y - lbl_w.height() // 2)
-                lbl_w.show()
-                self._labels.append(lbl_w)
+                # ── Texte MMR ─────────────────────────────────────────────
+                if html:
+                    lbl_w = QLabel(self._container)
+                    lbl_w.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+                    lbl_w.setTextFormat(Qt.TextFormat.RichText)
+                    lbl_w.setText(html)
+                    lbl_w.setStyleSheet("background:transparent;")
+                    lbl_w.adjustSize()
+                    # Bord droit du texte ancre sur x_text
+                    lbl_w.move(x_text - lbl_w.width(), y - lbl_w.height() // 2)
+                    lbl_w.show()
+                    self._labels.append(lbl_w)
+
+                # ── Icônes rang + playlist ────────────────────────────────
+                tier_id, pl_key = self._player_rank_tier(player)
+
+                # Icône de rang (ex : diamant)
+                if tier_id:
+                    rank_pm = get_rank_pixmap(tier_id, icon_sz)
+                    if rank_pm:
+                        rank_lbl = QLabel(self._container)
+                        rank_lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+                        rank_lbl.setStyleSheet("background:transparent;")
+                        rank_lbl.setPixmap(rank_pm)
+                        rank_lbl.adjustSize()
+                        rank_lbl.move(x_rank - rank_lbl.width() // 2,
+                                      y - rank_lbl.height() // 2)
+                        rank_lbl.show()
+                        self._labels.append(rank_lbl)
+
+                # Icône de playlist (ex : 2v2)
+                if pl_key:
+                    pl_pm = get_playlist_pixmap(pl_key, pl_sz)
+                    if pl_pm:
+                        pl_lbl = QLabel(self._container)
+                        pl_lbl.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+                        pl_lbl.setStyleSheet("background:transparent;")
+                        pl_lbl.setPixmap(pl_pm)
+                        pl_lbl.adjustSize()
+                        pl_lbl.move(x_playlist - pl_lbl.width() // 2,
+                                    y - pl_lbl.height() // 2)
+                        pl_lbl.show()
+                        self._labels.append(pl_lbl)
 
 
 # ── VK key map pour le hotkey listener ──────────────────────────────────────
