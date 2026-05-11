@@ -2051,6 +2051,7 @@ _UPDATE_DIRS = {
     "overlays":  os.path.join(BASE_DIR, "overlays"),
     "all rank":  os.path.join(BASE_DIR, "all rank"),
     "themes":    os.path.join(BASE_DIR, "themes"),
+    "Playlist":    os.path.join(BASE_DIR, "Playlist"),
 }
 
 def _github_auto_update(blocking=False, progress_cb=None):
