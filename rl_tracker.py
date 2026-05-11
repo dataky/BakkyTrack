@@ -108,6 +108,7 @@ DEFAULT_CONFIG = {
     "overlay_hotkey_key":            "key:tab",
     "overlay_hotkey_controller_btn": 0,
     "tab_rank_mode":                 "2v2",   # "1v1" | "2v2" | "3v3" | "best"
+    "tab_show_peak":                 True,    # afficher le peak MMR dans l'overlay Tab
     # Overlay manette
     "controller_overlay_enabled":    False,
     "controller_overlay_mode":       "with_bg",   # "with_bg" | "transparent"
@@ -1169,6 +1170,15 @@ class OverlayTab(QWidget):
             rm_btn_row.addWidget(b)
         rm_btn_row.addStretch()
         rml.addLayout(rm_btn_row)
+
+        # ── Checkbox peak MMR ─────────────────────────────────────────────
+        rml.addWidget(hsep())
+        self._peak_chk = QCheckBox("Afficher le peak MMR  (ex : peak[1950])")
+        self._peak_chk.setChecked(self.app.config.get("tab_show_peak", True))
+        self._peak_chk.setStyleSheet(
+            f"color:{C_TEXT};font-size:11px;spacing:8px;background:transparent;")
+        self._peak_chk.stateChanged.connect(self._on_peak_toggle)
+        rml.addWidget(self._peak_chk)
         root.addWidget(rm_card)
 
         # ── Toggle overlay principal ──────────────────────────────────────
@@ -1363,6 +1373,11 @@ class OverlayTab(QWidget):
                 f"color:{C_TEXT if active else C_MUTE};border:none;border-radius:4px;"
                 f"padding:5px 12px;font-size:10px;font-weight:700;}}"
                 + ("" if active else f"QPushButton:hover{{color:{C_TEXT};}}"))
+
+    def _on_peak_toggle(self, state):
+        show = bool(state)
+        self.app.config["tab_show_peak"] = show
+        self.app.ingame_mmr_overlay.set_show_peak(show)
 
     def refresh_preview(self, stats):
         if hasattr(self._preview, "update_stats"):
@@ -2100,6 +2115,7 @@ class MatchService:
         self._last_scores         = {}
         self.current_players         = []
         self._current_player_names   = ()   # tuple pour comparaison rapide
+        self.current_game_state      = {}   # dernier Game{} de UpdateState (bReplay, etc.)
         self.detected_player_name    = ""
         self.detected_player_primary_id = ""
         self._goal_counts         = {0: 0, 1: 0}
@@ -2254,10 +2270,16 @@ class MatchService:
             game    = inner.get("Game", {})
             players = inner.get("Players", [])
 
+            # Stocker l'etat du jeu (bReplay, etc.) pour l'overlay Tab
+            self.current_game_state = game
+
+            # Mise a jour systematique : les scores changent a chaque frame
+            # sans que les noms bougent — ne pas bloquer derriere le if.
+            self.current_players = players
+
             new_names = tuple(p.get("Name") for p in players)
             if new_names != self._current_player_names:
                 self._current_player_names = new_names
-                self.current_players = players
                 self.signals.players_updated.emit(players)
 
             for team in game.get("Teams", []):
@@ -2292,6 +2314,7 @@ class MatchService:
                     # qui émet aussi RoundStarted sans jamais avoir de TeamNum 1 dans Players.
                     if self._match_started:
                         self.signals.game_phase_changed.emit("ingame")
+
 
             if self.my_team is None:
                 platform    = self.config.get("platform", "epic").lower()
@@ -2338,19 +2361,39 @@ class MatchService:
                 # NOTRE équipe (ces champs ne sont visibles que pour sa propre équipe).
                 # Sans cette vérification, la transition fin-de-replay peut pointer
                 # la caméra sur le buteur adverse → équipe erronée détectée.
+                #
+                # Méthode secondaire : Target.Shortcut → Players[i].Shortcut
+                # Plus robuste que la correspondance par nom (pas sensible à la casse,
+                # aux caractères spéciaux…). Gardée en fallback car le champ Shortcut
+                # peut être absent / à 0 en jeu normal (fiable surtout en spectateur).
                 if self.my_team is None and game.get("bHasTarget") and not game.get("bReplay"):
-                    tgt      = game.get("Target", {})
-                    tgt_name = tgt.get("Name", "")
-                    tgt_team = tgt.get("TeamNum")
-                    if tgt_name and tgt_team is not None:
-                        for p in players:
-                            if p.get("Name") == tgt_name and "Boost" in p:
-                                self.my_team = tgt_team
-                                self._last_known_my_team = tgt_team
-                                if not self.detected_player_name:
-                                    self.detected_player_name = tgt_name
-                                self.signals.player_detected.emit(tgt_name, tgt_team)
-                                break
+                    tgt          = game.get("Target", {})
+                    tgt_name     = tgt.get("Name", "")
+                    tgt_team     = tgt.get("TeamNum")
+                    tgt_shortcut = tgt.get("Shortcut", 0)
+                    if tgt_team is not None:
+                        matched_player = None
+                        # Essai 1 : correspondance par Shortcut (si non nul)
+                        if tgt_shortcut:
+                            for p in players:
+                                if p.get("Shortcut") == tgt_shortcut and "Boost" in p:
+                                    matched_player = p
+                                    break
+                        # Essai 2 : correspondance par Name + champ Boost présent
+                        if matched_player is None and tgt_name:
+                            for p in players:
+                                if p.get("Name") == tgt_name and "Boost" in p:
+                                    matched_player = p
+                                    break
+                        if matched_player is not None:
+                            self.my_team = tgt_team
+                            self._last_known_my_team = tgt_team
+                            if not self.detected_player_name:
+                                self.detected_player_name = matched_player.get("Name", "")
+                            if not self.detected_player_primary_id:
+                                self.detected_player_primary_id = matched_player.get("PrimaryId", "")
+                            self.signals.player_detected.emit(
+                                matched_player.get("Name", tgt_name), tgt_team)
 
         # ── GoalScored ────────────────────────────────────────────────────
         elif event == "GoalScored":
@@ -2364,7 +2407,8 @@ class MatchService:
             # été écrasé par la nouvelle partie.
             # _had_opponent évite de déduire un résultat depuis le freeplay
             # (qui n'a qu'une seule équipe).
-            if not self._match_result_saved and self._match_started and self._had_opponent:
+            if (not self._match_result_saved and self._match_started
+                    and self._had_opponent):
                 my = self.my_team or self._last_known_my_team
                 if my is not None and self.team_scores:
                     my_score  = self.team_scores.get(my, 0)
@@ -2475,7 +2519,8 @@ class MatchService:
             # un round — évite les faux résultats quand MatchDestroyed d'une
             # ancienne partie arrive après que la nouvelle partie a déjà démarré.
             # _had_opponent évite les faux résultats depuis le freeplay.
-            if not self._match_result_saved and self._match_started and self._had_opponent:
+            if (not self._match_result_saved and self._match_started
+                    and self._had_opponent):
                 my = self.my_team or self._last_known_my_team
                 if my is not None and self.team_scores:
                     my_score  = self.team_scores.get(my, 0)
@@ -2556,7 +2601,7 @@ class MMRService:
         self.selected_playlist = "3v3"
         self.all_mmr = {
             k: {"mmr": None, "mmr_start": None, "mmr_change": 0,
-                "rank": "", "tier_id": 0, "div_id": 0}
+                "rank": "", "tier_id": 0, "div_id": 0, "peak_mmr": None}
             for k in PLAYLIST_NAMES
         }
         self._load_cache()
@@ -2585,6 +2630,9 @@ class MMRService:
                     self.all_mmr[k]["rank"]      = data[k].get("rank", "")
                     self.all_mmr[k]["tier_id"]   = data[k].get("tier_id", 0)
                     self.all_mmr[k]["div_id"]    = data[k].get("div_id", 0)
+                    peak = data[k].get("peak_mmr")
+                    if peak:
+                        self.all_mmr[k]["peak_mmr"] = peak
         except Exception:
             pass   # premier lancement ou cache corrompu, pas grave
 
@@ -2592,7 +2640,8 @@ class MMRService:
         try:
             data = {
                 k: {"mmr": v["mmr"], "rank": v.get("rank", ""),
-                    "tier_id": v.get("tier_id", 0), "div_id": v.get("div_id", 0)}
+                    "tier_id": v.get("tier_id", 0), "div_id": v.get("div_id", 0),
+                    **({"peak_mmr": v["peak_mmr"]} if v.get("peak_mmr") else {})}
                 for k, v in self.all_mmr.items() if v["mmr"] is not None
             }
             with open(self._CACHE_PATH, "w", encoding="utf-8") as f:
@@ -2718,6 +2767,16 @@ class MMRService:
                 if not updated:
                     raise ValueError("Aucune playlist ranked trouvée dans le profil")
 
+                # ── Peak MMR par playlist (segments type "peak-rating") ───────
+                for seg in data["data"].get("segments", []):
+                    if seg.get("type") != "peak-rating":
+                        continue
+                    pid      = seg.get("attributes", {}).get("playlistId")
+                    pl_key   = self._PLAYLIST_IDS.get(pid)
+                    peak_val = seg.get("stats", {}).get("peakRating", {}).get("value")
+                    if pl_key and peak_val:
+                        self.all_mmr[pl_key]["peak_mmr"] = int(peak_val)
+
                 self._save_cache()
                 self.signals.mmr_updated.emit()
                 self.signals.log_event.emit("✓ MMR & Ranks mis à jour (tracker.gg)")
@@ -2755,6 +2814,7 @@ class MainApp(QMainWindow):
         self.players_overlay_win = PlayersOverlayWindow()
         self.result_overlay      = ResultOverlay()
         self.ingame_mmr_overlay  = InGameMMROverlay()
+        self.ingame_mmr_overlay.set_show_peak(self.config.get("tab_show_peak", True))
         self.controller_overlay  = ControllerOverlay(
             self.config.get("controller_overlay_mode", "with_bg")
         )
@@ -2837,6 +2897,9 @@ class MainApp(QMainWindow):
         self.signals.trigger_sound.connect(self._trigger_sound)
         self.signals.press_key_sig.connect(self._handle_press_key)
         self.signals.game_phase_changed.connect(self._on_game_phase_changed)
+        # Quand MMRService reçoit de nouvelles données, mettre à jour l'entrée
+        # du cache in-game pour notre propre joueur (évite un fetch redondant).
+        self.signals.mmr_updated.connect(self._refresh_own_ingame_cache)
 
         self._overlay_timer = QTimer(self)
         self._overlay_timer.timeout.connect(self._push_overlay)
@@ -3159,13 +3222,48 @@ class MainApp(QMainWindow):
             self.players_overlay_win.show()
 
     # ── Joueurs du match → fetch MMR en background ────────────────────────
+    def _refresh_own_ingame_cache(self):
+        """Appelé quand MMRService reçoit de nouvelles données.
+        Met à jour l'entrée du cache in-game pour notre propre joueur."""
+        my_pid = self.match.detected_player_primary_id
+        if my_pid:
+            self._ingame_stats_cache[my_pid] = self._mmrsvc_to_ingame_entry()
+
+    # Mapping clé interne MMRService → playlistId tracker.gg
+    _MMRSVC_TO_PL_ID = {"1v1": 10, "2v2": 11, "3v3": 13}
+
+    def _mmrsvc_to_ingame_entry(self) -> dict:
+        """Convertit les données MMRService au format attendu par _ingame_stats_cache."""
+        playlists = {}
+        for key, pl_id in self._MMRSVC_TO_PL_ID.items():
+            d = self.mmr.all_mmr.get(key, {})
+            mmr_val = d.get("mmr")
+            if mmr_val is not None:
+                entry = {
+                    "mmr":       mmr_val,
+                    "tier_name": d.get("rank", "Unranked"),
+                    "tier_id":   d.get("tier_id", 0),
+                }
+                peak = d.get("peak_mmr")
+                if peak:
+                    entry["peak_mmr"] = peak
+                playlists[pl_id] = entry
+        return {"status": "ok", "playlists": playlists, "timestamp": time.time()}
+
     def _on_players_for_ingame(self, players: list):
         """Déclenche le fetch tracker.gg pour chaque joueur nouveau du match."""
         now = time.time()
+        # Pour notre propre joueur : réutiliser les données déjà fetchées par MMRService
+        # plutôt que de relancer un fetch tracker.gg redondant.
+        my_pid = self.match.detected_player_primary_id
         for p in players:
             pid  = p.get("PrimaryId", "")
             name = p.get("Name", "")
             if not pid:
+                continue
+            # Notre propre entrée : injecter les données MMRService dans le cache
+            if my_pid and pid == my_pid:
+                self._ingame_stats_cache[pid] = self._mmrsvc_to_ingame_entry()
                 continue
             entry = self._ingame_stats_cache.get(pid)
             # Ne re-fetch que si absent, en erreur, ou expiré
@@ -3186,12 +3284,7 @@ class MainApp(QMainWindow):
         """Rafraîchit l'overlay in-game avec les données à jour."""
         if not self.ingame_mmr_overlay.isVisible():
             return
-        self.ingame_mmr_overlay.set_data(
-            self.match.current_players,
-            self._ingame_stats_cache,
-            self.mmr.selected_playlist,
-            rank_mode=self.config.get("tab_rank_mode", "2v2"),
-        )
+        self._do_overlay_refresh()
 
     # ── Overlay hold-to-show loop ─────────────────────────────────────────
     def _is_overlay_hotkey_pressed(self) -> bool:
@@ -3243,18 +3336,31 @@ class MainApp(QMainWindow):
     def _on_overlay_hold_start(self):
         if not self.ingame_mmr_overlay.isVisible():
             self._overlay_hold_active = True
-            # Injecter les données immédiatement à l'ouverture
-            self.ingame_mmr_overlay.set_data(
-                self.match.current_players,
-                self._ingame_stats_cache,
-                self.mmr.selected_playlist,
-                rank_mode=self.config.get("tab_rank_mode", "2v2"),
-            )
+            # Injection + affichage immédiat au premier appui
+            self._do_overlay_refresh()
             self.ingame_mmr_overlay.show()
+            # Timer de refresh toutes les 1s pendant que la touche est maintenue
+            if not hasattr(self, "_overlay_hold_refresh_timer"):
+                self._overlay_hold_refresh_timer = QTimer(self)
+                self._overlay_hold_refresh_timer.timeout.connect(self._do_overlay_refresh)
+            self._overlay_hold_refresh_timer.start(1000)
+
+    def _do_overlay_refresh(self):
+        """Pousse les données à jour dans l'overlay et force un re-rendu."""
+        self.ingame_mmr_overlay.set_data(
+            self.match.current_players,
+            self._ingame_stats_cache,
+            self.mmr.selected_playlist,
+            rank_mode=self.config.get("tab_rank_mode", "2v2"),
+            game_state=self.match.current_game_state,
+        )
+        self.ingame_mmr_overlay._rebuild()
 
     def _on_overlay_hold_end(self):
         if getattr(self, "_overlay_hold_active", False):
             self._overlay_hold_active = False
+            if hasattr(self, "_overlay_hold_refresh_timer"):
+                self._overlay_hold_refresh_timer.stop()
             self.ingame_mmr_overlay.hide()
 
     # ── HTTP server ───────────────────────────────────────────────────────
