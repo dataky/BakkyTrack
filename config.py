@@ -1,0 +1,104 @@
+"""config.py — Constantes, Config, chemins, contexte SSL."""
+import os, sys, json, ssl as _ssl
+
+# ── Chemins ──────────────────────────────────────────────────────────────
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+CONFIG_PATH  = os.path.join(BASE_DIR, "config.json")
+OVERLAY_PORT = 49124
+REFRESH_MS   = 2000
+
+PLAYLIST_NAMES = {
+    "1v1": "Ranked Duel 1v1",
+    "2v2": "Ranked Doubles 2v2",
+    "3v3": "Ranked Standard 3v3",
+}
+
+# ── Contexte SSL — embarque certifi si disponible (fix PyInstaller) ───────
+try:
+    import certifi as _certifi
+    SSL_CTX = _ssl.create_default_context(cafile=_certifi.where())
+except Exception:
+    try:
+        SSL_CTX = _ssl.create_default_context()
+    except Exception:
+        SSL_CTX = None
+
+SSL_CTX_NOVERIFY = _ssl.create_default_context()
+SSL_CTX_NOVERIFY.check_hostname = False
+SSL_CTX_NOVERIFY.verify_mode    = _ssl.CERT_NONE
+
+# ── Icône par défaut (base64) ────────────────────────────────────────────
+DEFAULT_ICON_B64 = "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAB4ElEQVR4nO2bXVLDMAyEVYZzwDXhBHBNuEh5asd47FiKtdIm8ffYyY92tbYzaSyyuDa3yJu9fdzvmuN+v29hdUFvpBU8AmmI+4W9RPfwNsPtYmjhNV5GTF8kWnjNrBEvMydni/eoYbd7XuJ/vsbHvH+Oj9mbhFfrCQxdb/Goy2qEaQh4i/fqfom1RrUBrJ1vYalVZQBCvKb7M2hrnloF0Fjjv4ehAUeKfo2m9k0DUOLR8S8ZaegakN15z/hvaaGeAyJoGoDsPmLt19DTtBJQ/5DdfSQtbXQJiFj7S+gMiOafAWeO/4NaI1UCouMvEmQAS/dbUCUgg6cBZ3r0HVFqNb8Ss6KNf9YT4mGGACohhzEABdQAr9kfOT/QJwA9OcIMYF77S6gTELE0wpbBUfGjhEQ9F6QkgGl4PA2I/CxlBLr7pVbqOSACOgNO/0Zoa/ynvw9gmgdQ1BpphkBG90VIDMgSL9IwADkMstf/lrb0BGR2X6RjQNRkGCm+pyksAdnx79E1AJ0Chu6LDBKAMoFFvIhiCBz54UhTe/g/Q9mzfo3KgCOmQFuzOgEeJkR131KraQjMmMAoXiTgc/nH+I98y2Nh9yRouSGreJG1ZWZtmlrb5jwvVnPJjZNbMG6dXVydP/yruvfRgdsmAAAAAElFTkSuQmCC"
+
+DEFAULT_CONFIG = {
+    "platform":           "epic",
+    "username":           "",
+    "statsapi_port":      49123,
+    "overlay_mode":       "compact",
+    "mmr_display_mode":   "both",
+    "auto_skip_replay":   False,
+    "auto_queue":         False,
+    "auto_freeplay":      False,
+    "skip_replay_key":    "key:k",
+    "skip_replay_delay":  4.0,
+    "queue_key":          "key:m",
+    "queue_delay":        2.0,
+    "freeplay_key":       "key:l",
+    "freeplay_delay":     3.0,
+    "players_overlay_key": "key:f7",
+    "sound_goal_scored":   False,
+    "sound_goal_conceded": False,
+    "sound_crossbar":      False,
+    "sound_demo_me":       False,
+    "sound_demo_opponent": False,
+    "sound_epic_save":     False,
+    "sound_save":          False,
+    "snd_file_goal_scored":   "",
+    "snd_file_goal_conceded": "",
+    "snd_file_crossbar":      "",
+    "snd_file_demo_me":       "",
+    "snd_file_demo_opponent": "",
+    "snd_file_epic_save":     "",
+    "snd_file_save":          "",
+    "result_overlay_enabled": True,
+    "result_overlay_theme":   "auto",
+    "overlay_hotkey_type":           "key",
+    "overlay_hotkey_key":            "key:tab",
+    "overlay_hotkey_controller_btn": 0,
+    "tab_rank_mode":                 "2v2",
+    "tab_show_peak":                 True,
+    "controller_overlay_enabled":    False,
+    "controller_overlay_mode":       "with_bg",
+    "streamer_mode":                 False,
+    "streamer_mute_audio":           True,
+}
+
+
+class Config:
+    def __init__(self):
+        self._d = dict(DEFAULT_CONFIG)
+        self._load()
+
+    def _load(self):
+        try:
+            with open(CONFIG_PATH, encoding="utf-8") as f:
+                self._d.update(json.load(f))
+        except Exception:
+            pass
+
+    def save(self) -> bool:
+        try:
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(self._d, f, indent=2, ensure_ascii=False)
+            return True
+        except Exception as e:
+            print(f"[Config] save error: {e}")
+            return False
+
+    def __getitem__(self, k):    return self._d[k]
+    def __setitem__(self, k, v): self._d[k] = v
+    def get(self, k, d=None):   return self._d.get(k, d)
