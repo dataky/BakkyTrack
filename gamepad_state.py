@@ -56,21 +56,25 @@ os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 #   4=L1  5=R1  6=L2(digital)  7=R2(digital)
 #   8=Share/Create  9=Options  10=L3  11=R3  12=PS  13=Pavé tactile
 #
-# Sur certains systèmes (Linux / drivers différents) l'ordre peut être :
-#   0=Croix  1=Rond  2=Carré  3=Triangle  …
-# → Si les boutons sont toujours inversés, échangez les indices ci-dessous.
+# Layout détecté sur ce système (Linux / SDL Raw) :
+#   0=Croix(X)  1=Rond(O)  2=Carré  3=Triangle
+#   4=L1  5=R1  6=L2(digital)  7=R2(digital)
+#   8=Share/Create  9=Options  10=L3  11=R3  12=PS  13=Pavé tactile
+#
+# Si L1/R1 ne répondent toujours pas, lancer le script en direct
+# (python gamepad_state.py) et regarder l'indice qui change dans Btns[].
 # ─────────────────────────────────────────────────────────────────────────────
 _PS_BTN_MAP = {
-    1:  0x1000,  # Croix     → A
-    2:  0x2000,  # Rond      → B
-    0:  0x4000,  # Carré     → X
-    3:  0x8000,  # Triangle  → Y
+    0:  0x1000,  # Croix (X)  → A
+    1:  0x2000,  # Rond  (O)  → B
+    2:  0x4000,  # Carré      → X
+    3:  0x8000,  # Triangle   → Y
     8:  0x0020,  # Share/Create → Back
-    9:  0x0010,  # Options   → Start
+    9:  0x0010,  # Options    → Start
     10: 0x0040,  # L3
     11: 0x0080,  # R3
-    4:  0x0100,  # L1
-    5:  0x0200,  # R1
+    4:  0x0100,  # L1  ← si inactif, essayer 6
+    5:  0x0200,  # R1  ← si inactif, essayer 7
 }
 
 def _ensure_joy():
@@ -121,6 +125,22 @@ def _get_joy():
     return _cached_joy
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _norm_trigger(val: float) -> float:
+    """
+    Normalise une gâchette analogique en [0.0, 1.0].
+
+    Deux comportements selon le driver SDL :
+      • Repos à -1.0  → plage -1 … +1  →  (val + 1) / 2
+      • Repos à  0.0  → plage  0 … +1  →  val  (utilisé directement)
+
+    La branche est choisie sur le signe de val : si val < 0 le driver
+    utilise bien la convention -1/+1 ; sinon on est déjà en 0/+1.
+    """
+    if val < 0.0:
+        return (val + 1.0) / 2.0
+    return val
+
+
 def _poll_joystick():
     try:
         _pg.event.pump()
@@ -162,22 +182,17 @@ def _poll_joystick():
     n = joy.get_numaxes()
 
     if n >= 6:
-        # ── CORRECTIF AXES DS4/DualSense sous Windows (6 axes) ──────────────
-        # BUG ORIGINAL : axes 2 et 5 utilisés pour le stick droit,
-        #                axes 3 et 4 pour les gâchettes → INVERSÉ !
-        #
-        # Ordre réel SDL/pygame en mode Raw :
-        #   0 = LX   1 = LY   2 = L2 (-1→1)
-        #   3 = RX   4 = RY   5 = R2 (-1→1)
-        # ─────────────────────────────────────────────────────────────────────
+        # Ordre réel SDL/pygame en mode Raw (DS4/DualSense) :
+        #   0=LX  1=LY  2=L2  3=RX  4=RY  5=R2
         gp.sThumbRX = int(max(-32768, min(32767,  get_ax(3) * 32767)))
         gp.sThumbRY = int(max(-32768, min(32767, -get_ax(4) * 32767)))
 
-        # Gâchettes : -1.0 au repos → +1.0 complètement enfoncées
-        l2_raw = (get_ax(2) + 1.0) / 2.0
-        r2_raw = (get_ax(5) + 1.0) / 2.0
-        gp.bLeftTrigger  = int(l2_raw * 255)
-        gp.bRightTrigger = int(r2_raw * 255)
+        # ── CORRECTIF GÂCHETTES ──────────────────────────────────────────────
+        # Certains drivers renvoient -1→+1 (repos=-1), d'autres 0→+1 (repos=0).
+        # _norm_trigger() gère les deux automatiquement.
+        # ─────────────────────────────────────────────────────────────────────
+        gp.bLeftTrigger  = int(_norm_trigger(get_ax(2)) * 255)
+        gp.bRightTrigger = int(_norm_trigger(get_ax(5)) * 255)
 
     elif n >= 4:
         # Fallback : manettes génériques 4 axes (RX=2, RY=3, pas de gâchettes)
