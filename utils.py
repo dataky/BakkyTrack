@@ -315,13 +315,12 @@ _UPDATE_DIRS = {
 }
 
 
-_github_auto_update_done = False  # garde — exécution unique par session
-
 def _github_auto_update(blocking=False, progress_cb=None):
-    global _github_auto_update_done
-    if _github_auto_update_done:
+    # Utilise os.environ pour garantir l'unicité même si utils.py
+    # est importé plusieurs fois sous des noms de modules différents
+    if os.environ.get("_BAKKYTRACK_UPDATE_DONE"):
         return
-    _github_auto_update_done = True
+    os.environ["_BAKKYTRACK_UPDATE_DONE"] = "1"
 
     def _log(msg):
         print(msg)
