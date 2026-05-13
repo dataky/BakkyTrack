@@ -199,13 +199,6 @@ BakkyTrack détecte automatiquement le joueur principal à partir du flux StatsA
 
 ```bash
 pyinstaller --onefile --windowed --clean --name BakkyTrack ^
-  --icon=logo.ico ^ Optionnel
-  --add-data "all rank;all rank" ^
-  --add-data "Playlist;Playlist" ^
-  --add-data "themes;themes" ^
-  --add-data "overlays;overlays" ^
-  --add-data "logo.png;." ^
-  --add-data "logo.ico;." ^
   --hidden-import PyQt6.QtSvg ^
   main.py
 ```
