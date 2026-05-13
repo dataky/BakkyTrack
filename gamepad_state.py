@@ -51,30 +51,25 @@ os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
 # ── CORRECTIF BOUTONS ────────────────────────────────────────────────────────
-# Sur DS4/DualSense en mode "Raw" via pygame/SDL sous Windows :
-#   0=Carré  1=Croix  2=Rond  3=Triangle
-#   4=L1  5=R1  6=L2(digital)  7=R2(digital)
-#   8=Share/Create  9=Options  10=L3  11=R3  12=PS  13=Pavé tactile
-#
-# Layout détecté sur ce système (Linux / SDL Raw) :
+# Layout détecté sur ce système (Linux / SDL Raw — variante B) :
 #   0=Croix(X)  1=Rond(O)  2=Carré  3=Triangle
-#   4=L1  5=R1  6=L2(digital)  7=R2(digital)
+#   4=L2(digital)  5=R2(digital)  6=L1  7=R1
 #   8=Share/Create  9=Options  10=L3  11=R3  12=PS  13=Pavé tactile
 #
-# Si L1/R1 ne répondent toujours pas, lancer le script en direct
-# (python gamepad_state.py) et regarder l'indice qui change dans Btns[].
+# Note : L2/R2 analogiques sont lus sur les axes 2 et 5 (_poll_joystick).
+#        Les boutons digitaux 4/5 sont ignorés (redondants avec les axes).
 # ─────────────────────────────────────────────────────────────────────────────
 _PS_BTN_MAP = {
-    0:  0x1000,  # Croix (X)  → A
-    1:  0x2000,  # Rond  (O)  → B
-    2:  0x4000,  # Carré      → X
-    3:  0x8000,  # Triangle   → Y
-    8:  0x0020,  # Share/Create → Back
-    9:  0x0010,  # Options    → Start
+    0:  0x1000,  # Croix (X)     → A
+    1:  0x2000,  # Rond  (O)     → B
+    2:  0x4000,  # Carré         → X
+    3:  0x8000,  # Triangle      → Y
+    8:  0x0020,  # Share/Create  → Back
+    9:  0x0010,  # Options       → Start
     10: 0x0040,  # L3
     11: 0x0080,  # R3
-    4:  0x0100,  # L1  ← si inactif, essayer 6
-    5:  0x0200,  # R1  ← si inactif, essayer 7
+    6:  0x0100,  # L1  (LB)
+    7:  0x0200,  # R1  (RB)
 }
 
 def _ensure_joy():
