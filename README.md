@@ -1,7 +1,7 @@
 # 🚀 BakkyTrack
 
 **Companion Rocket League avec overlay in-game, suivi MMR, automation et sons personnalisés.**  
-Compatible BakkesMod v2 — StatsAPI + WebSocket.
+StatsAPI + WebSocket.
 
 ---
 
@@ -54,20 +54,6 @@ BakkyTrack expose un serveur HTTP local sur le **port 49124** pour les overlays 
 - **Windows** (l'overlay manette et les automations utilisent des API Win32/XInput)
 
 ---
-
-## 🔧 Installation
-
-```bash
-# 1. Cloner le dépôt
-git clone https://github.com/<ton-pseudo>/bakkytrack.git
-cd bakkytrack
-
-# 2. Installer les dépendances
-pip install PyQt6 websocket-client pyautogui pygame vgamepad certifi
-
-# 3. Lancer
-python rl_tracker.py
-```
 
 > `pyautogui`, `pygame`, `vgamepad`, `websocket-client` et `certifi` sont **optionnels** —  
 > l'application démarre et désactive gracieusement les fonctionnalités manquantes.
@@ -212,8 +198,16 @@ BakkyTrack détecte automatiquement le joueur principal à partir du flux StatsA
 ## 🏗 Build exécutable (PyInstaller)
 
 ```bash
-pip install pyinstaller
-pyinstaller --onefile --windowed --name BakkyTrack rl_tracker.py
+pyinstaller --onefile --windowed --clean --name BakkyTrack ^
+  --icon=logo.ico ^ Optionnel
+  --add-data "all rank;all rank" ^
+  --add-data "Playlist;Playlist" ^
+  --add-data "themes;themes" ^
+  --add-data "overlays;overlays" ^
+  --add-data "logo.png;." ^
+  --add-data "logo.ico;." ^
+  --hidden-import PyQt6.QtSvg ^
+  main.py
 ```
 
 L'exécutable détecte automatiquement son répertoire pour charger `config.json`, les thèmes, les overlays et les icônes de rang.
