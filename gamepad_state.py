@@ -1,60 +1,24 @@
-# gamepad_state.py — Lecture manette : XInput (Xbox) puis pygame.joystick (PlayStation, etc.)
-#
-# Usage :
-#   from gamepad_state import get_gamepad_state
-#
-#   st = get_gamepad_state()      # None si aucune manette
-#   if st:
-#       gp = st.Gamepad
-#       print(gp.wButtons, gp.bLeftTrigger, gp.sThumbLX)
-
+# gamepad_state.py — Version corrigée pour manettes PlayStation "Raw"
 import ctypes
 import sys
 
-
-# ---------------------------------------------------------------------------
-# Structures XInput (Windows SDK) — utilisées comme format de sortie commun
-# ---------------------------------------------------------------------------
-
+# ------------------------- XInput (Xbox et émulation) -------------------------
 class XINPUT_GAMEPAD(ctypes.Structure):
     _fields_ = [
-        ("wButtons",       ctypes.c_uint16),  # Masques boutons (voir constantes XBTN_*)
-        ("bLeftTrigger",   ctypes.c_uint8),   # Gâchette gauche  : 0-255
-        ("bRightTrigger",  ctypes.c_uint8),   # Gâchette droite  : 0-255
-        ("sThumbLX",       ctypes.c_int16),   # Stick gauche X   : -32768..+32767
-        ("sThumbLY",       ctypes.c_int16),   # Stick gauche Y   : -32768..+32767
-        ("sThumbRX",       ctypes.c_int16),   # Stick droit  X   : -32768..+32767
-        ("sThumbRY",       ctypes.c_int16),   # Stick droit  Y   : -32768..+32767
+        ("wButtons", ctypes.c_uint16),
+        ("bLeftTrigger", ctypes.c_uint8),
+        ("bRightTrigger", ctypes.c_uint8),
+        ("sThumbLX", ctypes.c_int16),
+        ("sThumbLY", ctypes.c_int16),
+        ("sThumbRX", ctypes.c_int16),
+        ("sThumbRY", ctypes.c_int16),
     ]
-
 
 class XINPUT_STATE(ctypes.Structure):
     _fields_ = [
         ("dwPacketNumber", ctypes.c_uint32),
-        ("Gamepad",        XINPUT_GAMEPAD),
+        ("Gamepad", XINPUT_GAMEPAD),
     ]
-
-
-# Masques de boutons XInput (champ wButtons)
-XBTN_DPAD_UP        = 0x0001
-XBTN_DPAD_DOWN      = 0x0002
-XBTN_DPAD_LEFT      = 0x0004
-XBTN_DPAD_RIGHT     = 0x0008
-XBTN_START          = 0x0010
-XBTN_BACK           = 0x0020
-XBTN_LEFT_THUMB     = 0x0040
-XBTN_RIGHT_THUMB    = 0x0080
-XBTN_LEFT_SHOULDER  = 0x0100
-XBTN_RIGHT_SHOULDER = 0x0200
-XBTN_A              = 0x1000
-XBTN_B              = 0x2000
-XBTN_X              = 0x4000
-XBTN_Y              = 0x8000
-
-
-# ---------------------------------------------------------------------------
-# Backend XInput (Windows — manettes Xbox ou émulation Xbox)
-# ---------------------------------------------------------------------------
 
 _xinput = None
 if sys.platform == "win32":
@@ -65,209 +29,204 @@ if sys.platform == "win32":
         except OSError:
             pass
 
-
-def _poll_xinput(user_index: int = 0):
-    """Retourne un XINPUT_STATE via XInput, ou None si indisponible / manette absente."""
+def _poll_xinput(user_index=0):
     if not _xinput:
         return None
     st = XINPUT_STATE()
-    if _xinput.XInputGetState(user_index, ctypes.byref(st)) != 0:
+    ret = _xinput.XInputGetState(user_index, ctypes.byref(st))
+    if ret != 0:
         return None
     return st
 
-
-# ---------------------------------------------------------------------------
-# Backend pygame.joystick (DualShock 4, DualSense, Switch Pro, générique…)
-# ---------------------------------------------------------------------------
-
+# ------------------------- pygame (Manettes PS4/PS5/Switch) -------------------
 try:
-    import pygame as _pygame
+    import pygame as _pg
 except ImportError:
-    _pygame = None
+    _pg = None
 
-_joy_inited = False
-_joy_pkt    = 0
+_joy_initialized = False
 
-# Correspondance index bouton pygame → masque XInput
-# Disposition typique DualShock 4 / DualSense sous SDL/pygame :
-#   0=Croix  1=Rond  2=Carré   3=Triangle
-#   4=Share  5=PS    6=Options
-#   7=L3     8=R3    9=L1     10=R1
-#  11=D↑    12=D↓  13=D←    14=D→
-_JOY_BTN_MAP = (
-    ( 0, XBTN_A),              # Croix      → A
-    ( 1, XBTN_B),              # Rond       → B
-    ( 2, XBTN_X),              # Carré      → X
-    ( 3, XBTN_Y),              # Triangle   → Y
-    ( 4, XBTN_BACK),           # Share      → Back
-    ( 6, XBTN_START),          # Options    → Start
-    ( 7, XBTN_LEFT_THUMB),     # L3
-    ( 8, XBTN_RIGHT_THUMB),    # R3
-    ( 9, XBTN_LEFT_SHOULDER),  # L1         → LB
-    (10, XBTN_RIGHT_SHOULDER), # R1         → RB
-    (11, XBTN_DPAD_UP),
-    (12, XBTN_DPAD_DOWN),
-    (13, XBTN_DPAD_LEFT),
-    (14, XBTN_DPAD_RIGHT),
-)
+import os
+os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
-# Index des axes pygame pour DualShock 4 / DualSense :
-#   0=LX  1=LY  2=RX  3=RY  4=L2  5=R2
-# Les triggers SDL sont dans [-1.0, +1.0] : -1.0 = relâché, +1.0 = enfoncé.
-_AXIS_LX = 0
-_AXIS_LY = 1
-_AXIS_RX = 2
-_AXIS_RY = 3
-_AXIS_L2 = 4
-_AXIS_R2 = 5
+# ── CORRECTIF BOUTONS ────────────────────────────────────────────────────────
+# Sur DS4/DualSense en mode "Raw" via pygame/SDL sous Windows :
+#   0=Carré  1=Croix  2=Rond  3=Triangle
+#   4=L1  5=R1  6=L2(digital)  7=R2(digital)
+#   8=Share/Create  9=Options  10=L3  11=R3  12=PS  13=Pavé tactile
+#
+# Sur certains systèmes (Linux / drivers différents) l'ordre peut être :
+#   0=Croix  1=Rond  2=Carré  3=Triangle  …
+# → Si les boutons sont toujours inversés, échangez les indices ci-dessous.
+# ─────────────────────────────────────────────────────────────────────────────
+_PS_BTN_MAP = {
+    1:  0x1000,  # Croix     → A
+    2:  0x2000,  # Rond      → B
+    0:  0x4000,  # Carré     → X
+    3:  0x8000,  # Triangle  → Y
+    8:  0x0020,  # Share/Create → Back
+    9:  0x0010,  # Options   → Start
+    10: 0x0040,  # L3
+    11: 0x0080,  # R3
+    4:  0x0100,  # L1
+    5:  0x0200,  # R1
+}
 
-
-def _ensure_joy() -> bool:
-    """Initialise pygame + joystick une seule fois. Retourne False si pygame absent."""
-    global _joy_inited
-    if _pygame is None:
+def _ensure_joy():
+    global _joy_initialized
+    if _pg is None:
         return False
-    if not _joy_inited:
+    if not _joy_initialized:
         try:
-            if not _pygame.get_init():
-                _pygame.init()
-            _pygame.joystick.init()
-            _joy_inited = True
+            _pg.init()
+            _pg.joystick.init()
+            _joy_initialized = True
         except Exception:
             return False
     return True
 
+# ── CORRECTIF PRINCIPAL : cache du joystick ───────────────────────────────
+# BUG ORIGINAL : `_pg.joystick.Joystick(0)` était recréé à CHAQUE appel.
+# SDL réinitialise alors l'objet et renvoie des états à zéro.
+# Solution : instancier une seule fois et réutiliser l'objet.
+_cached_joy = None
+_cached_joy_count = 0
 
-def _clamp_i16(v: int) -> int:
-    return max(-32768, min(32767, v))
-
-
-def _float_to_i16(f: float) -> int:
-    """Axe pygame [-1.0, +1.0] → entier signé 16 bits."""
-    return _clamp_i16(int(f * 32767))
-
-
-def _trigger_to_byte(f: float) -> int:
-    """
-    Trigger SDL [-1.0 relâché … +1.0 enfoncé] → octet 0-255.
-    La correction +1/2 est indispensable car SDL initialise les triggers à -1.0.
-    """
-    normalized = max(0.0, min(1.0, (f + 1.0) / 2.0))
-    return int(normalized * 255)
-
-
-def _poll_joystick(user_index: int = 0):
-    """Lit la manette via pygame.joystick et renvoie un XINPUT_STATE synthétique."""
-    global _joy_pkt
+def _get_joy():
+    """Retourne le joystick 0 mis en cache, ou None si absent."""
+    global _cached_joy, _cached_joy_count
     if not _ensure_joy():
         return None
 
-    try:
-        _pygame.event.pump()
-        count = _pygame.joystick.get_count()
-    except Exception:
+    count = _pg.joystick.get_count()
+
+    # Manette débranchée → on vide le cache
+    if count == 0:
+        _cached_joy = None
+        _cached_joy_count = 0
         return None
 
-    if count <= user_index:
-        return None
-
-    try:
-        joy = _pygame.joystick.Joystick(user_index)
-        if not joy.get_init():
+    # Nouvelle manette branchée (ou premier accès) → on (ré)initialise
+    if _cached_joy is None or count != _cached_joy_count:
+        try:
+            joy = _pg.joystick.Joystick(0)
             joy.init()
+            _cached_joy = joy
+            _cached_joy_count = count
+        except Exception:
+            _cached_joy = None
+            return None
+
+    return _cached_joy
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _poll_joystick():
+    try:
+        _pg.event.pump()
     except Exception:
+        pass
+
+    joy = _get_joy()
+    if joy is None:
         return None
 
-    _joy_pkt = (_joy_pkt + 1) & 0xFFFFFFFF
     st = XINPUT_STATE()
-    st.dwPacketNumber = _joy_pkt
     gp = st.Gamepad
 
-    # --- Boutons ---
-    num_btns = joy.get_numbuttons()
+    # 1. BOUTONS
     w = 0
-    for bi, mask in _JOY_BTN_MAP:
-        try:
-            if bi < num_btns and joy.get_button(bi):
-                w |= mask
-        except Exception:
-            pass
+    num_btns = joy.get_numbuttons()
+    for ps_idx, x_mask in _PS_BTN_MAP.items():
+        if ps_idx < num_btns and joy.get_button(ps_idx):
+            w |= x_mask
+
+    # 2. D-PAD (Hat)
+    if joy.get_numhats() > 0:
+        hx, hy = joy.get_hat(0)
+        if hy ==  1: w |= 0x0001  # Haut
+        if hy == -1: w |= 0x0002  # Bas
+        if hx == -1: w |= 0x0004  # Gauche
+        if hx ==  1: w |= 0x0008  # Droite
+
     gp.wButtons = w
 
-    # --- Axes ---
-    num_axes = joy.get_numaxes()
+    # 3. AXES
+    def get_ax(i):
+        return joy.get_axis(i) if i < joy.get_numaxes() else 0.0
 
-    def ax(i: int) -> float:
-        try:
-            return joy.get_axis(i) if i < num_axes else 0.0
-        except Exception:
-            return 0.0
+    # Stick gauche — identique sur toutes les variantes
+    gp.sThumbLX = int(max(-32768, min(32767,  get_ax(0) * 32767)))
+    gp.sThumbLY = int(max(-32768, min(32767, -get_ax(1) * 32767)))
 
-    gp.sThumbLX      = _float_to_i16(ax(_AXIS_LX))
-    gp.sThumbLY      = _float_to_i16(ax(_AXIS_LY))
-    gp.sThumbRX      = _float_to_i16(ax(_AXIS_RX))
-    gp.sThumbRY      = _float_to_i16(ax(_AXIS_RY))
-    gp.bLeftTrigger  = _trigger_to_byte(ax(_AXIS_L2))
-    gp.bRightTrigger = _trigger_to_byte(ax(_AXIS_R2))
+    n = joy.get_numaxes()
 
+    if n >= 6:
+        # ── CORRECTIF AXES DS4/DualSense sous Windows (6 axes) ──────────────
+        # BUG ORIGINAL : axes 2 et 5 utilisés pour le stick droit,
+        #                axes 3 et 4 pour les gâchettes → INVERSÉ !
+        #
+        # Ordre réel SDL/pygame en mode Raw :
+        #   0 = LX   1 = LY   2 = L2 (-1→1)
+        #   3 = RX   4 = RY   5 = R2 (-1→1)
+        # ─────────────────────────────────────────────────────────────────────
+        gp.sThumbRX = int(max(-32768, min(32767,  get_ax(3) * 32767)))
+        gp.sThumbRY = int(max(-32768, min(32767, -get_ax(4) * 32767)))
+
+        # Gâchettes : -1.0 au repos → +1.0 complètement enfoncées
+        l2_raw = (get_ax(2) + 1.0) / 2.0
+        r2_raw = (get_ax(5) + 1.0) / 2.0
+        gp.bLeftTrigger  = int(l2_raw * 255)
+        gp.bRightTrigger = int(r2_raw * 255)
+
+    elif n >= 4:
+        # Fallback : manettes génériques 4 axes (RX=2, RY=3, pas de gâchettes)
+        gp.sThumbRX = int(max(-32768, min(32767,  get_ax(2) * 32767)))
+        gp.sThumbRY = int(max(-32768, min(32767, -get_ax(3) * 32767)))
+
+    st.dwPacketNumber = 1
     return st
 
 
-# ---------------------------------------------------------------------------
-# API publique
-# ---------------------------------------------------------------------------
+# ------------------------- API publique -------------------------
+def get_gamepad_state(user_index=0):
+    # 1. Tenter XInput (Xbox / Manettes émulées)
+    if sys.platform == "win32":
+        st = _poll_xinput(user_index)
+        if st is not None:
+            return st
 
-def get_gamepad_state(user_index: int = 0):
+    # 2. Tenter Pygame (PS4, PS5, Switch, etc.)
+    return _poll_joystick()
+
+
+# ------------------------- Outil de diagnostic -------------------------
+def print_raw_state():
     """
-    Retourne l'état de la manette au format XINPUT_STATE.
-
-    Priorité :
-      1. XInput natif (Windows, manettes Xbox ou mode émulation Xbox)
-      2. pygame.joystick (DualShock 4, DualSense, Switch Pro, manettes génériques)
-
-    Retourne None si aucune manette n'est connectée ou si pygame n'est pas installé.
-
-    Exemple :
-        st = get_gamepad_state()
-        if st:
-            gp = st.Gamepad
-            if gp.wButtons & XBTN_A:
-                print("Bouton A / Croix pressé")
-            print(f"Stick gauche X : {gp.sThumbLX}")
-            print(f"Gâchette gauche : {gp.bLeftTrigger}")
+    Lance une boucle de debug dans le terminal.
+    Lance avec :  python gamepad_state.py
+    Affiche en temps réel les indices/valeurs bruts de tous les axes et boutons,
+    ce qui permet de corriger le mapping si besoin.
     """
-    st = _poll_xinput(user_index)
-    if st is not None:
-        return st
-    return _poll_joystick(user_index)
+    import time
+    if not _ensure_joy():
+        print("pygame non disponible."); return
+    print("En attente d'une manette… (Ctrl+C pour quitter)")
+    while True:
+        try:
+            _pg.event.pump()
+        except Exception:
+            pass
+        joy = _get_joy()
+        if joy is None:
+            print("\r  [aucune manette]", end="", flush=True)
+            time.sleep(0.2); continue
+        axes = [round(joy.get_axis(i), 3) for i in range(joy.get_numaxes())]
+        btns = [joy.get_button(i) for i in range(joy.get_numbuttons())]
+        hats = [joy.get_hat(i) for i in range(joy.get_numhats())]
+        line = f"\rAxes={axes}  Btns={btns}  Hats={hats}   "
+        print(line, end="", flush=True)
+        time.sleep(0.05)
 
-
-def is_button_pressed(state: XINPUT_STATE, button_mask: int) -> bool:
-    """Raccourci : teste un masque de bouton sur un état déjà récupéré."""
-    if state is None:
-        return False
-    return bool(state.Gamepad.wButtons & button_mask)
-
-
-def get_left_stick(state: XINPUT_STATE) -> tuple[float, float]:
-    """Retourne (x, y) du stick gauche normalisé dans [-1.0, +1.0]."""
-    if state is None:
-        return (0.0, 0.0)
-    gp = state.Gamepad
-    return (gp.sThumbLX / 32767.0, gp.sThumbLY / 32767.0)
-
-
-def get_right_stick(state: XINPUT_STATE) -> tuple[float, float]:
-    """Retourne (x, y) du stick droit normalisé dans [-1.0, +1.0]."""
-    if state is None:
-        return (0.0, 0.0)
-    gp = state.Gamepad
-    return (gp.sThumbRX / 32767.0, gp.sThumbRY / 32767.0)
-
-
-def get_triggers(state: XINPUT_STATE) -> tuple[float, float]:
-    """Retourne (gauche, droite) des gâchettes normalisées dans [0.0, 1.0]."""
-    if state is None:
-        return (0.0, 0.0)
-    gp = state.Gamepad
-    return (gp.bLeftTrigger / 255.0, gp.bRightTrigger / 255.0)
+if __name__ == "__main__":
+    print_raw_state()
