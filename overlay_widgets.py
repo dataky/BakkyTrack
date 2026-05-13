@@ -14,22 +14,6 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtSvg import QSvgRenderer
 
-# ── Contexte SSL — embarque certifi si disponible (fix PyInstaller) ───────────
-import ssl as _ssl
-try:
-    import certifi as _certifi
-    _SSL_CTX = _ssl.create_default_context(cafile=_certifi.where())
-except Exception:
-    try:
-        _SSL_CTX = _ssl.create_default_context()
-    except Exception:
-        _SSL_CTX = None   # fallback : vérification SSL désactivée
-
-# Contexte sans vérification SSL — utilisé si _SSL_CTX échoue
-_SSL_CTX_NOVERIFY = _ssl.create_default_context()
-_SSL_CTX_NOVERIFY.check_hostname = False
-_SSL_CTX_NOVERIFY.verify_mode    = _ssl.CERT_NONE
-
 
 # ── Couleurs (partagées avec rl_tracker.py) ──────────────────────────────────
 C_BG    = "#0A0C10"
@@ -2044,149 +2028,10 @@ class _DragLayer(QWidget):
         self.dbl_clicked.emit()
 
 
-# ── Auto-updater GitHub ───────────────────────────────────────────────────────
-_GITHUB_API  = "https://api.github.com/repos/dataky/BakkyTrack/contents/"
-_GITHUB_RAW  = "https://raw.githubusercontent.com/dataky/BakkyTrack/main/"
-_UPDATE_DIRS = {
-    "overlays":  os.path.join(BASE_DIR, "overlays"),
-    "all rank":  os.path.join(BASE_DIR, "all rank"),
-    "themes":    os.path.join(BASE_DIR, "themes"),
-    "Playlist":    os.path.join(BASE_DIR, "Playlist"),
-}
-
-def _github_auto_update(blocking=False, progress_cb=None):
-    """
-    Parcourt chaque dossier GitHub via l'API, compare le SHA Git local/distant,
-    et télécharge uniquement les fichiers nouveaux ou modifiés.
-    blocking=True : attend la fin (premier lancement sans fichiers locaux).
-    blocking=False : thread daemon — aucun impact sur le démarrage.
-    progress_cb : callable(msg: str) pour feedback dans l'UI (optionnel).
-    """
-    import urllib.request, urllib.error, json, hashlib, threading
-
-    def _log(msg):
-        print(msg)
-        if progress_cb:
-            try:
-                progress_cb(msg)
-            except Exception:
-                pass
-
-    def _urlopen(req, timeout=10):
-        """Essaie avec le contexte SSL normal, puis sans vérification si ça échoue."""
-        ctx = _SSL_CTX if _SSL_CTX is not None else _SSL_CTX_NOVERIFY
-        try:
-            return urllib.request.urlopen(req, timeout=timeout, context=ctx)
-        except Exception as e:
-            if "SSL" in str(e) or "certificate" in str(e).lower():
-                _log(f"[Updater] SSL fallback (vérification désactivée) pour {req.full_url[:60]}")
-                return urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX_NOVERIFY)
-            raise
-
-    def _git_sha1(data: bytes) -> str:
-        header = f"blob {len(data)}\0".encode()
-        return hashlib.sha1(header + data).hexdigest()
-
-    def _update_dir(remote_path: str, local_dir: str):
-        os.makedirs(local_dir, exist_ok=True)
-        
-        # Si le dossier existe et contient déjà des fichiers, skip la requête API
-        if os.path.isdir(local_dir) and any(os.path.isfile(os.path.join(local_dir, f)) for f in os.listdir(local_dir)):
-            _log(f"[Updater] {remote_path} — déjà présent localement, skip")
-            return
-        
-        url = _GITHUB_API + urllib.parse.quote(remote_path)
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "BakkyTrack"})
-            with _urlopen(req, timeout=8) as r:
-                entries = json.loads(r.read())
-        except urllib.error.HTTPError as e:
-            if e.code == 403:
-                _log(f"[Updater] Limite GitHub atteinte pour {remote_path}. Réessai dans 60s ou utilisez un token GitHub.")
-            else:
-                _log(f"[Updater] Impossible de lister {remote_path} : {e}")
-            return
-        except Exception as e:
-            _log(f"[Updater] Impossible de lister {remote_path} : {e}")
-            return
-        
-        time.sleep(0.5)  # Délai pour éviter le rate limiting
-        downloaded = 0
-        for entry in entries:
-            if entry.get("type") != "file":
-                continue
-            name       = entry["name"]
-            remote_sha = entry["sha"]
-            raw_url    = _GITHUB_RAW + urllib.parse.quote(f"{remote_path}/{name}")
-            local_path = os.path.join(local_dir, name)
-            if os.path.exists(local_path):
-                try:
-                    with open(local_path, "rb") as f:
-                        if _git_sha1(f.read()) == remote_sha:
-                            continue
-                except Exception:
-                    pass
-            try:
-                time.sleep(0.3)  # Délai entre les téléchargements
-                req = urllib.request.Request(raw_url, headers={"User-Agent": "BakkyTrack"})
-                with _urlopen(req, timeout=10) as r:
-                    data = r.read()
-                with open(local_path, "wb") as f:
-                    f.write(data)
-                downloaded += 1
-                _log(f"[Updater] ✓ {remote_path}/{name}")
-            except urllib.error.HTTPError as e:
-                if e.code == 403:
-                    _log(f"[Updater] ✗ {remote_path}/{name} : Limite GitHub (HTTP 403)")
-                else:
-                    _log(f"[Updater] ✗ {remote_path}/{name} : {e}")
-            except Exception as e:
-                _log(f"[Updater] ✗ {remote_path}/{name} : {e}")
-        if downloaded == 0:
-            _log(f"[Updater] {remote_path} — déjà à jour")
-
-    def _run():
-        _log("[Updater] Vérification des mises à jour GitHub…")
-        for remote_path, local_dir in _UPDATE_DIRS.items():
-            _update_dir(remote_path, local_dir)
-        # logo.ico à la racine
-        _logo_local = os.path.join(BASE_DIR, "logo.ico")
-        if os.path.exists(_logo_local):
-            _log("[Updater] logo.ico — déjà présent, skip")
-            return
-        _logo_url   = _GITHUB_RAW + "BakkyTrack/logo.ico"
-        try:
-            time.sleep(0.5)
-            req = urllib.request.Request(_logo_url, headers={"User-Agent": "BakkyTrack"})
-            with _urlopen(req, timeout=8) as r:
-                data = r.read()
-            with open(_logo_local, "wb") as f:
-                f.write(data)
-            _log("[Updater] ✓ logo.ico")
-        except urllib.error.HTTPError as e:
-            if e.code == 403:
-                _log(f"[Updater] ✗ logo.ico : Limite GitHub (HTTP 403)")
-            else:
-                _log(f"[Updater] ✗ logo.ico : {e}")
-        except Exception as e:
-            _log(f"[Updater] ✗ logo.ico : {e}")
-        _log("[Updater] ✓ Terminé")
-
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
-    if blocking:
-        t.join(timeout=30)   # timeout de sécurité : max 30 secondes en mode bloquant
-
-
 def _load_overlay_plugins() -> dict:
     """Charge dynamiquement tous les plugins depuis le dossier overlays/.
     Retourne {name: {"widget": QWidget, "size": (w, h)}}
     """
-    # Premier lancement : overlays/ vide → téléchargement synchrone avant chargement
-    import glob as _glob
-    _overlay_folder = os.path.join(BASE_DIR, "overlays")
-    _first_launch = not _glob.glob(os.path.join(_overlay_folder, "*.py"))
-    _github_auto_update(blocking=False)  # toujours en background — ne bloque plus le démarrage
 
     import importlib.util, glob
     plugins = {}
