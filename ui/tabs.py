@@ -449,8 +449,9 @@ class OverlayTab(QWidget):
             def _on_click(checked, k=key, btn_ref=b, style_fn=_style):
                 self.app.config["tab_rank_mode"] = k
                 for other_key, other_btn in self._rm_btns.items():
-                    other_btn.setChecked(other_key == k)
-                style_fn(True)
+                    is_active = other_key == k
+                    other_btn.setChecked(is_active)
+                    other_btn._style_fn(is_active)
             b._style_fn = _style; b.clicked.connect(_on_click); return b
         for lbl_txt, key in _RM_OPTS:
             b = _make_rm_btn(lbl_txt, key); self._rm_btns[key] = b; rm_btn_row.addWidget(b)
