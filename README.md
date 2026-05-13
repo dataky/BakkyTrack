@@ -77,20 +77,28 @@ python rl_tracker.py
 ## 🗂 Structure du projet
 
 ```
-bakkytrack/
-├── rl_tracker.py          # Application principale + logique BakkesMod
-├── overlay_widgets.py     # Widgets overlay (PyQt6) — styles, overlays flottants
-├── gamepad_state.py       # Lecture manette : XInput (Xbox) + SDL (PlayStation)
-├── config.json            # Généré automatiquement au premier lancement
-├── overlays/              # Fichiers HTML servis à OBS
-│   └── overlay.html
-├── themes/                # Fonds SVG de l'application et des overlays résultat
-│   ├── rl_classic.svg
-│   ├── victory.svg
-│   ├── defeat.svg
-│   ├── neon.svg
-│   └── dark_minimal.svg
-└── all rank/              # Icônes de rang (0.png → 23.png)
+BakkyTrack/
+├── main.py                # entry point (30 lignes)
+├── config.py              # Config, DEFAULT_CONFIG, constantes, chemins, SSL
+├── style.py               # couleurs, APP_STYLE, helpers card/lbl/btn/hsep
+├── signals.py             # AppSignals
+├── services/
+│   ├── __init__.py
+│   ├── match.py           # MatchService
+│   ├── mmr.py             # MMRService
+│   └── sound.py           # SoundService (+ cache _ingame_stats, helpers tracker.gg)
+├── overlay_widgets.py     # déjà propre, on ajuste juste les imports
+├── ui/
+│   ├── __init__.py
+│   ├── main_window.py     # MainApp
+│   ├── tabs.py            # les 6 onglets (TrackerTab, PlayersTab, OverlayTab, AutomationTab, SoundTab, SettingsTab)
+│   ├── dialogs.py         # KeyCaptureDialog, KeyCaptureWidget, OverlayBindDialog, BindWorker
+│   ├── ingame_overlay.py  # InGameMMROverlay
+│   ├── players_overlay.py # PlayersOverlayWindow
+│   ├── controller_overlay.py # ControllerOverlay + _CtrlCanvas
+│   └── streamer_bar.py    # StreamerModeBar
+├── utils.py               # _key_to_vk, _VK_MAP, _key_display, _QT_KEY_MAP, get_rank_pixmap, get_playlist_pixmap, SVG_BACKGROUNDS, SvgBackground, ResultOverlay, _github_auto_update
+└── gamepad_state.py
 ```
 
 ---
@@ -161,6 +169,30 @@ BakkyTrack lit les inputs manette via deux backends complémentaires :
 - **SDL via pygame** — DualShock 4, DualSense, et autres manettes non-XInput
 
 Le backend XInput est essayé en premier ; SDL prend le relais automatiquement si aucune manette XInput n'est détectée.
+
+> **Note SDL** — pygame est initialisé en mode headless (`SDL_VIDEODRIVER=dummy`) pour éviter tout conflit avec le système vidéo quand il tourne en arrière-plan.
+
+---
+
+## 🔍 Détection du compte en jeu
+
+BakkyTrack détecte automatiquement le joueur principal à partir du flux StatsAPI, sans configuration manuelle obligatoire.
+
+### Comportement par plateforme
+
+| Plateforme | Identifiant utilisé |
+|------------|---------------------|
+| Epic Games | Pseudo du compte (ex : `MonPseudo#1234`) |
+| Steam | **Steam64 ID** (ex : `76561198012345678`) extrait automatiquement du `PrimaryId` |
+| PS4 / Xbox / Switch | Pseudo du compte |
+
+> Pour **Steam**, le champ `username` dans les options doit contenir le **Steam64 ID** (et non le pseudo Steam), afin que la recherche MMR sur tracker.gg fonctionne correctement.
+
+### Mécanisme de détection
+
+1. **Par plateforme + identifiant** — le `PrimaryId` reçu de StatsAPI est filtré selon le préfixe de la plateforme configurée (`Epic|`, `Steam|`, etc.)
+2. **Par pseudo** — si le `PrimaryId` ne suffit pas, le nom du joueur est comparé au pseudo configuré
+3. **Par caméra (fallback)** — si les deux méthodes échouent, la cible de la caméra in-game (`Target`) est utilisée pour identifier le joueur local
 
 ---
 
