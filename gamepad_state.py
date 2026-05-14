@@ -1,4 +1,15 @@
 # gamepad_state.py
+#
+# IMPORTANT — intégration avec un overlay / boucle pygame existante :
+#
+#   Dans ta boucle principale, appelle UNE FOIS par frame :
+#       gamepad_state.pump()          ← met à jour l'état SDL2
+#   Puis autant de fois que tu veux :
+#       st = gamepad_state.get_gamepad_state()
+#
+#   Si tu as déjà pygame.event.get() ou pygame.event.pump() dans ta boucle,
+#   tu n'as PAS besoin d'appeler gamepad_state.pump() en plus.
+
 import ctypes, sys, os
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
@@ -50,28 +61,26 @@ except ImportError:
     _pg = _sdl2ctrl = None
     _HAS_SDL2 = False
 
-_initialized  = False
-_cached_ctrl  = None
+_initialized = False
+_cached_ctrl = None
 
-# Constantes SDL2 (valeurs enum SDL_GameControllerButton / Axis)
-_CB = dict(A=0, B=1, X=2, Y=3,
-           BACK=4, GUIDE=5, START=6,
-           L3=7, R3=8,
-           LB=9, RB=10,
-           DUP=11, DDOWN=12, DLEFT=13, DRIGHT=14)
+# Constantes SDL2 (enum SDL_GameControllerButton / Axis)
+_CB_A=0; _CB_B=1; _CB_X=2; _CB_Y=3
+_CB_BACK=4; _CB_GUIDE=5; _CB_START=6
+_CB_L3=7; _CB_R3=8; _CB_LB=9; _CB_RB=10
+_CB_DUP=11; _CB_DDOWN=12; _CB_DLEFT=13; _CB_DRIGHT=14
 
-_CA = dict(LX=0, LY=1, RX=2, RY=3, LT=4, RT=5)
+_CA_LX=0; _CA_LY=1; _CA_RX=2; _CA_RY=3; _CA_LT=4; _CA_RT=5
 
-# Masques XInput émulés
 _BTN_MASKS = {
-    _CB["DUP"]:   0x0001, _CB["DDOWN"]: 0x0002,
-    _CB["DLEFT"]: 0x0004, _CB["DRIGHT"]:0x0008,
-    _CB["BACK"]:  0x0020, _CB["START"]: 0x0010,
-    _CB["L3"]:    0x0040, _CB["R3"]:    0x0080,
-    _CB["LB"]:    0x0100, _CB["RB"]:    0x0200,
-    _CB["GUIDE"]: 0x0400,
-    _CB["A"]:     0x1000, _CB["B"]:     0x2000,
-    _CB["X"]:     0x4000, _CB["Y"]:     0x8000,
+    _CB_DUP:   0x0001, _CB_DDOWN: 0x0002,
+    _CB_DLEFT: 0x0004, _CB_DRIGHT:0x0008,
+    _CB_BACK:  0x0020, _CB_START: 0x0010,
+    _CB_L3:    0x0040, _CB_R3:    0x0080,
+    _CB_LB:    0x0100, _CB_RB:    0x0200,
+    _CB_GUIDE: 0x0400,
+    _CB_A:     0x1000, _CB_B:     0x2000,
+    _CB_X:     0x4000, _CB_Y:     0x8000,
 }
 
 
@@ -89,13 +98,33 @@ def _init():
     return _initialized
 
 
+def pump():
+    """
+    Met à jour l'état SDL2 des manettes.
+
+    Appelle cette fonction UNE FOIS par frame dans ta boucle principale,
+    AVANT d'appeler get_gamepad_state().
+
+    Si ta boucle appelle déjà pygame.event.get() ou pygame.event.pump(),
+    tu n'as PAS besoin d'appeler cette fonction.
+
+    NE PAS appeler depuis un thread secondaire.
+    """
+    if _pg is not None:
+        try:
+            # event.pump() met à jour l'état interne SDL2 sans retirer
+            # les events de la file — l'overlay les recevra quand même.
+            _pg.event.pump()
+        except Exception:
+            pass
+
+
 def _get_ctrl():
-    """Retourne le Controller SDL2 mis en cache. Ne pompe PAS les events ici."""
+    """Cache du Controller SDL2. Ne touche PAS aux events."""
     global _cached_ctrl
     if not _init():
         return None
 
-    # Cache encore valide ?
     if _cached_ctrl is not None:
         try:
             if _cached_ctrl.attached():
@@ -104,7 +133,6 @@ def _get_ctrl():
             pass
         _cached_ctrl = None
 
-    # Chercher une manette reconnue SDL2
     for i in range(_pg.joystick.get_count()):
         try:
             if not _sdl2ctrl.is_controller(i):
@@ -120,15 +148,7 @@ def _get_ctrl():
 
 
 def _poll_sdl2():
-    # ── CORRECTIF CLÉ : event.pump() ICI, avant chaque lecture ──────────────
-    # Sans ça, SDL2 ne met pas à jour l'état des boutons/axes entre deux appels.
-    # Le relâchement d'un bouton n'était donc jamais détecté.
-    try:
-        _pg.event.pump()
-    except Exception:
-        pass
-    # ─────────────────────────────────────────────────────────────────────────
-
+    # Pas de event.pump() ici — c'est le rôle de pump() / de la boucle appelante
     ctrl = _get_ctrl()
     if ctrl is None:
         return None
@@ -136,57 +156,51 @@ def _poll_sdl2():
     st = XINPUT_STATE()
     gp = st.Gamepad
 
-    # Boutons
     w = 0
     for btn, mask in _BTN_MASKS.items():
         try:
             if ctrl.get_button(btn):
                 w |= mask
         except Exception:
-            _cached_ctrl = None   # force ré-init au prochain appel
+            global _cached_ctrl
+            _cached_ctrl = None
             return None
     gp.wButtons = w
 
-    # Axes
     def ax(i):
-        try:
-            return ctrl.get_axis(i)
-        except Exception:
-            return 0
+        try:    return ctrl.get_axis(i)
+        except: return 0
 
-    # Sticks : SDL2 renvoie -32768…+32767, Y inversé (SDL haut = négatif)
-    gp.sThumbLX =  ax(_CA["LX"])
-    gp.sThumbLY = -ax(_CA["LY"])
-    gp.sThumbRX =  ax(_CA["RX"])
-    gp.sThumbRY = -ax(_CA["RY"])
+    gp.sThumbLX =  ax(_CA_LX)
+    gp.sThumbLY = -ax(_CA_LY)   # Y inversé : SDL haut=-32768, XInput haut=+32767
+    gp.sThumbRX =  ax(_CA_RX)
+    gp.sThumbRY = -ax(_CA_RY)
 
-    # Gâchettes : SDL2 Controller renvoie 0…+32767
-    gp.bLeftTrigger  = int(max(0, ax(_CA["LT"])) * 255 // 32767)
-    gp.bRightTrigger = int(max(0, ax(_CA["RT"])) * 255 // 32767)
+    # Gâchettes SDL2 Controller : 0…+32767
+    gp.bLeftTrigger  = int(max(0, ax(_CA_LT)) * 255 // 32767)
+    gp.bRightTrigger = int(max(0, ax(_CA_RT)) * 255 // 32767)
 
     st.dwPacketNumber = 1
     return st
 
-# ── 3. Fallback joystick brut (manettes non reconnues par SDL2 Controller) ───
-# Mappings officiels pygame 2 :
-# PS4 — 6 axes, 16 boutons, 0 hat  (ref: pygame.org/docs/ref/joystick.html)
-# PS5 — 6 axes, 13 boutons, 1 hat
+# ── 3. Fallback joystick brut ────────────────────────────────────────────────
+# Utilisé uniquement si SDL2 Controller ne reconnaît pas la manette.
+# Mappings officiels pygame 2 (ref: pygame.org/docs/ref/joystick.html)
 
 _PS4_MAP = {
-    0:0x1000, 1:0x2000, 2:0x4000, 3:0x8000,  # Croix Rond Carré Triangle
-    4:0x0020, 5:0x0400, 6:0x0010,             # Share PS Options
-    7:0x0040, 8:0x0080,                        # L3 R3
-    9:0x0100, 10:0x0200,                       # L1 R1
-    11:0x0001,12:0x0002,13:0x0004,14:0x0008,  # D-pad (boutons PS4)
-    15:0x0800,                                 # Touchpad
+    0:0x1000, 1:0x2000, 2:0x4000, 3:0x8000,
+    4:0x0020, 5:0x0400, 6:0x0010,
+    7:0x0040, 8:0x0080,
+    9:0x0100, 10:0x0200,
+    11:0x0001, 12:0x0002, 13:0x0004, 14:0x0008,
+    15:0x0800,
 }
 
 _PS5_MAP = {
-    0:0x1000, 1:0x2000, 2:0x4000, 3:0x8000,  # Croix Rond Carré Triangle
-    4:0x0100, 5:0x0200,                        # L1 R1
-    # 6=L2dig 7=R2dig ignorés (redondants axes)
-    8:0x0020, 9:0x0010, 10:0x0400,            # Create Options PS
-    11:0x0040, 12:0x0080,                      # L3 R3
+    0:0x1000, 1:0x2000, 2:0x4000, 3:0x8000,
+    4:0x0100, 5:0x0200,
+    8:0x0020, 9:0x0010, 10:0x0400,
+    11:0x0040, 12:0x0080,
 }
 
 _fb_joy = None
@@ -198,11 +212,14 @@ def _get_joy_fb():
         return None
     n = _pg.joystick.get_count()
     if n == 0:
-        _fb_joy = None; return None
+        _fb_joy = None
+        return None
     if _fb_joy is None or n != _fb_cnt:
         try:
-            j = _pg.joystick.Joystick(0); j.init()
-            _fb_joy = j; _fb_cnt = n
+            j = _pg.joystick.Joystick(0)
+            j.init()
+            _fb_joy = j
+            _fb_cnt = n
         except Exception:
             _fb_joy = None
     return _fb_joy
@@ -213,20 +230,14 @@ def _norm_trig(v):
 
 
 def _poll_fallback():
-    # event.pump() ici aussi pour le fallback
-    try:
-        _pg.event.pump()
-    except Exception:
-        pass
-
     joy = _get_joy_fb()
     if joy is None:
         return None
 
-    name   = joy.get_name().lower()
-    is_ps5 = "dualsense" in name or "wireless controller" in name
-    bmap   = _PS5_MAP if is_ps5 else _PS4_MAP
-    use_hat= is_ps5
+    name    = joy.get_name().lower()
+    is_ps5  = "dualsense" in name or "wireless controller" in name
+    bmap    = _PS5_MAP if is_ps5 else _PS4_MAP
+    use_hat = is_ps5
 
     st = XINPUT_STATE()
     gp = st.Gamepad
@@ -265,6 +276,12 @@ def _poll_fallback():
 # ── API publique ─────────────────────────────────────────────────────────────
 
 def get_gamepad_state(user_index=0):
+    """
+    Retourne XINPUT_STATE ou None si aucune manette connectée.
+
+    Assure-toi que pump() (ou pygame.event.get/pump) est appelé
+    dans ta boucle principale AVANT cet appel.
+    """
     if sys.platform == "win32":
         st = _poll_xinput(user_index)
         if st is not None:
@@ -283,10 +300,7 @@ def print_raw_state():
     print("En attente d'une manette… (Ctrl+C pour quitter)\n")
     last_name = None
     while True:
-        # IMPORTANT : pump avant toute lecture
-        try: _pg.event.pump()
-        except Exception: pass
-
+        pump()   # ← ici c'est nous la boucle principale, on pumpe nous-mêmes
         ctrl = _get_ctrl()
         joy  = _get_joy_fb()
 
