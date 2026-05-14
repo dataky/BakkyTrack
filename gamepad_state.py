@@ -83,6 +83,24 @@ _BTN_MASKS = {
     _CB_X:     0x4000, _CB_Y:     0x8000,
 }
 
+# Mappings additionnels pour SDL2 (PS4/PS5) – au cas où la base interne est vide
+_PS_SDL2_MAPPINGS = [
+    # DualShock 4 (USB / Bluetooth)
+    "030000004c050000cc09000000000000,Sony DualShock 4,a:b0,b:b1,back:b8,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b4,leftstick:b10,lefttrigger:a3,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b11,righttrigger:a4,rightx:a2,righty:a5,start:b9,x:b2,y:b3,platform:Windows",
+    # DualSense
+    "030000004c0500002669000000000000,Sony DualSense,a:b0,b:b1,back:b8,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b12,leftshoulder:b4,leftstick:b10,lefttrigger:a3,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b11,righttrigger:a4,rightx:a2,righty:a5,start:b9,x:b2,y:b3,platform:Windows",
+]
+
+def _load_ps_mappings_sdl2():
+    """Ajoute les mappings PS4/PS5 à la base SDL2 si elle existe."""
+    if not _HAS_SDL2 or _sdl2ctrl is None:
+        return
+    try:
+        mapping_db = _sdl2ctrl.ControllerMappingDB()
+        for mapping in _PS_SDL2_MAPPINGS:
+            mapping_db.add_mapping(mapping)
+    except Exception:
+        pass
 
 def _init():
     global _initialized
@@ -92,11 +110,11 @@ def _init():
         _pg.init()
         _pg.joystick.init()
         _sdl2ctrl.init()
+        _load_ps_mappings_sdl2()   # ← ajout des mappings PS manquants
         _initialized = True
     except Exception:
         pass
     return _initialized
-
 
 def pump():
     """
@@ -112,12 +130,9 @@ def pump():
     """
     if _pg is not None:
         try:
-            # event.pump() met à jour l'état interne SDL2 sans retirer
-            # les events de la file — l'overlay les recevra quand même.
             _pg.event.pump()
         except Exception:
             pass
-
 
 def _get_ctrl():
     """Cache du Controller SDL2. Ne touche PAS aux events."""
@@ -146,9 +161,7 @@ def _get_ctrl():
             continue
     return None
 
-
 def _poll_sdl2():
-    # Pas de event.pump() ici — c'est le rôle de pump() / de la boucle appelante
     ctrl = _get_ctrl()
     if ctrl is None:
         return None
@@ -172,36 +185,17 @@ def _poll_sdl2():
         except: return 0
 
     gp.sThumbLX =  ax(_CA_LX)
-    gp.sThumbLY = -ax(_CA_LY)   # Y inversé : SDL haut=-32768, XInput haut=+32767
+    gp.sThumbLY = -ax(_CA_LY)   # Y inversé
     gp.sThumbRX =  ax(_CA_RX)
     gp.sThumbRY = -ax(_CA_RY)
 
-    # Gâchettes SDL2 Controller : 0…+32767
     gp.bLeftTrigger  = int(max(0, ax(_CA_LT)) * 255 // 32767)
     gp.bRightTrigger = int(max(0, ax(_CA_RT)) * 255 // 32767)
 
     st.dwPacketNumber = 1
     return st
 
-# ── 3. Fallback joystick brut ────────────────────────────────────────────────
-# Utilisé uniquement si SDL2 Controller ne reconnaît pas la manette.
-# Mappings officiels pygame 2 (ref: pygame.org/docs/ref/joystick.html)
-
-_PS4_MAP = {
-    0:0x1000, 1:0x2000, 2:0x4000, 3:0x8000,
-    4:0x0020, 5:0x0400, 6:0x0010,
-    7:0x0040, 8:0x0080,
-    9:0x0100, 10:0x0200,
-    11:0x0001, 12:0x0002, 13:0x0004, 14:0x0008,
-    15:0x0800,
-}
-
-_PS5_MAP = {
-    0:0x1000, 1:0x2000, 2:0x4000, 3:0x8000,
-    4:0x0100, 5:0x0200,
-    8:0x0020, 9:0x0010, 10:0x0400,
-    11:0x0040, 12:0x0080,
-}
+# ── 3. Fallback joystick brut (CORRIGÉ pour PS4/PS5) ────────────────────────
 
 _fb_joy = None
 _fb_cnt = 0
@@ -224,51 +218,112 @@ def _get_joy_fb():
             _fb_joy = None
     return _fb_joy
 
-
 def _norm_trig(v):
-    return (v + 1.0) / 2.0 if v < 0.0 else v
-
+    # v ∈ [-1, 1] pour les gâchettes en mode DirectInput
+    # Sur PS4/PS5, les gâchettes sont sur [0, 1] mais parfois centrées à -1
+    if v < 0.0:
+        return (v + 1.0) / 2.0
+    return v
 
 def _poll_fallback():
+    """
+    Version corrigée pour les manettes PlayStation.
+    Utilise les mappings réels de pygame.joystick (index de boutons standard).
+    """
     joy = _get_joy_fb()
     if joy is None:
         return None
 
-    name    = joy.get_name().lower()
-    is_ps5  = "dualsense" in name or "wireless controller" in name
-    bmap    = _PS5_MAP if is_ps5 else _PS4_MAP
-    use_hat = is_ps5
+    name = joy.get_name().lower()
+    # Détection étendue des manettes Sony
+    is_ps = any(term in name for term in (
+        "wireless controller", "dualshock", "dualsense", "playstation",
+        "sony", "ps4", "ps5"
+    ))
 
-    st = XINPUT_STATE()
-    gp = st.Gamepad
-    w  = 0
+    if not is_ps:
+        # Si ce n'est pas une manette Sony, on garde l'ancien comportement (très limité)
+        # mais on ne va pas l'améliorer ici.
+        return None
+
+    # Mapping des boutons pygame.joystick (index) → masques XINPUT
+    # Basé sur les tests réels avec DS4 et DualSense en mode DirectInput
+    # (sans pilote Xbox)
+    PS_BUTTON_MAP = {
+        0: 0x1000,   # X (croix)   → A
+        1: 0x2000,   # Circle      → B
+        2: 0x4000,   # Square      → X
+        3: 0x8000,   # Triangle    → Y
+        4: 0x0100,   # L1          → LB
+        5: 0x0200,   # R1          → RB
+        6: 0x0040,   # L2          → L3 (attention: ce n'est pas idéal, mais faute de mieux)
+        7: 0x0080,   # R2          → R3
+        8: 0x0020,   # Share       → Back
+        9: 0x0010,   # Options     → Start
+        10: 0x0400,  # PS button   → Guide
+        11: 0x0040,  # L3 (stick gauche enfoncé) → L3 (réel)
+        12: 0x0080,  # R3 (stick droit enfoncé)  → R3 (réel)
+        13: 0x0000,  # Touchpad (pas de correspondance XInput)
+    }
+
+    # Pour le D-Pad, beaucoup de manettes PS le présentent comme un "hat"
+    # Sinon, les boutons individuels (14,15,16,17) peuvent exister.
+    # On va gérer les deux.
+
     nb = joy.get_numbuttons()
+    w = 0
 
-    for idx, mask in bmap.items():
+    # Boutons standards
+    for idx, mask in PS_BUTTON_MAP.items():
         if idx < nb and joy.get_button(idx):
             w |= mask
 
-    if use_hat and joy.get_numhats() > 0:
+    # D-Pad via hat (le plus fiable)
+    if joy.get_numhats() > 0:
         hx, hy = joy.get_hat(0)
-        if hy ==  1: w |= 0x0001
-        if hy == -1: w |= 0x0002
-        if hx == -1: w |= 0x0004
-        if hx ==  1: w |= 0x0008
+        if hy ==  1: w |= 0x0001  # up
+        if hy == -1: w |= 0x0002  # down
+        if hx == -1: w |= 0x0004  # left
+        if hx ==  1: w |= 0x0008  # right
 
+    # Fallback : si le hat ne donne rien, on cherche les boutons du D-Pad
+    # (généralement indices 14-17 sur DS4)
+    if not (w & 0x000F):
+        dpad_map = {14:0x0001, 15:0x0002, 16:0x0004, 17:0x0008}
+        for idx, mask in dpad_map.items():
+            if idx < nb and joy.get_button(idx):
+                w |= mask
+
+    st = XINPUT_STATE()
+    gp = st.Gamepad
     gp.wButtons = w
 
-    def ax(i): return joy.get_axis(i) if i < joy.get_numaxes() else 0.0
-    gp.sThumbLX = int(max(-32768, min(32767,  ax(0)*32767)))
-    gp.sThumbLY = int(max(-32768, min(32767, -ax(1)*32767)))
-    n = joy.get_numaxes()
-    if n >= 6:
-        gp.sThumbRX      = int(max(-32768, min(32767,  ax(3)*32767)))
-        gp.sThumbRY      = int(max(-32768, min(32767, -ax(4)*32767)))
-        gp.bLeftTrigger  = int(_norm_trig(ax(2))*255)
-        gp.bRightTrigger = int(_norm_trig(ax(5))*255)
-    elif n >= 4:
-        gp.sThumbRX = int(max(-32768, min(32767,  ax(2)*32767)))
-        gp.sThumbRY = int(max(-32768, min(32767, -ax(3)*32767)))
+    # Axes
+    num_axes = joy.get_numaxes()
+    def ax(i):
+        return joy.get_axis(i) if i < num_axes else 0.0
+
+    # Stick gauche (généralement axes 0,1)
+    gp.sThumbLX = int(max(-32768, min(32767,  ax(0) * 32767)))
+    gp.sThumbLY = int(max(-32768, min(32767, -ax(1) * 32767)))  # Y inversé
+
+    # Stick droit (axes 2,3 sur DS4/DS5)
+    if num_axes >= 4:
+        gp.sThumbRX = int(max(-32768, min(32767,  ax(2) * 32767)))
+        gp.sThumbRY = int(max(-32768, min(32767, -ax(3) * 32767)))
+    else:
+        gp.sThumbRX = 0
+        gp.sThumbRY = 0
+
+    # Gâchettes : sur DS4/DS5 ce sont les axes 4 et 5 (en mode DirectInput)
+    # Valeurs brutes: L2 = axe 4, R2 = axe 5, intervalle [0,1] (parfois [-1,1])
+    lt_val = 0.0
+    rt_val = 0.0
+    if num_axes >= 5:
+        lt_val = _norm_trig(ax(4))
+        rt_val = _norm_trig(ax(5))
+    gp.bLeftTrigger  = int(max(0, min(255, lt_val * 255)))
+    gp.bRightTrigger = int(max(0, min(255, rt_val * 255)))
 
     st.dwPacketNumber = 1
     return st
@@ -291,32 +346,44 @@ def get_gamepad_state(user_index=0):
         return st
     return _poll_fallback()
 
-# ── Diagnostic ───────────────────────────────────────────────────────────────
+# ── Diagnostic (optionnel, amélioré pour afficher les noms réels) ────────────
 
 def print_raw_state():
     import time
     if not _init() and _pg is None:
-        print("pygame non disponible."); return
+        print("pygame non disponible.")
+        return
     print("En attente d'une manette… (Ctrl+C pour quitter)\n")
     last_name = None
     while True:
-        pump()   # ← ici c'est nous la boucle principale, on pumpe nous-mêmes
+        pump()
         ctrl = _get_ctrl()
         joy  = _get_joy_fb()
 
         if ctrl is None and joy is None:
             print("\r[aucune manette]", end="", flush=True)
-            time.sleep(0.2); continue
+            time.sleep(0.2)
+            continue
 
-        name = (_sdl2ctrl.name_forindex(0) or "?") if ctrl else joy.get_name()
-        mode = "sdl2_controller" if ctrl else "joystick_fallback"
+        name = None
+        mode = ""
+        if ctrl:
+            try:
+                name = _sdl2ctrl.name_forindex(0)
+            except:
+                name = "Unknown SDL2 Controller"
+            mode = "sdl2_controller"
+        elif joy:
+            name = joy.get_name()
+            mode = "joystick_fallback"
+
         if name != last_name:
             print(f"\n>>> '{name}'  mode={mode}")
             last_name = name
 
+        # Affichage compact pour le diagnostic
         if ctrl:
-            labels = ["A","B","X","Y","BACK","GUIDE","START",
-                      "L3","R3","LB","RB","↑","↓","←","→"]
+            labels = ["A","B","X","Y","BACK","GUIDE","START","L3","R3","LB","RB","↑","↓","←","→"]
             pressed = [labels[i] for i in range(15) if ctrl.get_button(i)]
             axes = {
                 "LX": round(ctrl.get_axis(0)/32767,2),
