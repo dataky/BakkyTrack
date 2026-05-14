@@ -1,4 +1,4 @@
-# gamepad_state.py — Version corrigée pour manettes PlayStation "Raw"
+# gamepad_state.py — Version corrigée avec mapping complet PS4 / PS5 Raw
 import ctypes
 import sys
 
@@ -50,27 +50,91 @@ import os
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
-# ── CORRECTIF BOUTONS ────────────────────────────────────────────────────────
-# Layout détecté sur ce système (Linux / SDL Raw — variante B) :
-#   0=Croix(X)  1=Rond(O)  2=Carré  3=Triangle
-#   4=L2(digital)  5=R2(digital)  6=L1  7=R1
-#   8=Share/Create  9=Options  10=L3  11=R3  12=PS  13=Pavé tactile
+# ── MAPPINGS BOUTONS ─────────────────────────────────────────────────────────
 #
-# Note : L2/R2 analogiques sont lus sur les axes 2 et 5 (_poll_joystick).
-#        Les boutons digitaux 4/5 sont ignorés (redondants avec les axes).
+# Deux variantes selon le mode SDL détecté par le nom de la manette :
+#
+# ── MODE A : PS4 Raw (Linux/SDL, "PS4 Controller") — 16 boutons, 0 hat ──────
+#   0=Croix   1=Rond   2=Carré   3=Triangle
+#   4=Share   5=PS     6=Options
+#   7=L3      8=R3
+#   9=L1     10=R1
+#  11=Haut   12=Bas   13=Gauche  14=Droite   ← D-pad en boutons
+#  15=Pavé tactile
+#  Axes : 0=LX  1=LY  2=L2  3=RX  4=RY  5=R2
+#
+# ── MODE B : PS5 Raw (Linux/SDL, "Wireless Controller") — 13 boutons, 1 hat ─
+#   0=Croix   1=Rond   2=Carré   3=Triangle
+#   4=L1      5=R1
+#   6=L2(dig) 7=R2(dig)   ← redondants avec les axes 2/5, ignorés ici
+#   8=Create  9=Options  10=PS   11=L3  12=R3  13=Pavé tactile (si présent)
+#  Hat 0 : D-pad (SDL convention : hy=1→Haut, hy=-1→Bas, hx=-1→Gauche, hx=1→Droite)
+#  Axes : 0=LX  1=LY  2=L2  3=RX  4=RY  5=R2
+#
+# Masques XInput étendus (bits non-standard pour PS/Touchpad) :
+#   0x0400 = bouton PS / Guide   (pas d'équivalent XInput officiel)
+#   0x0800 = Pavé tactile click  (pas d'équivalent XInput officiel)
 # ─────────────────────────────────────────────────────────────────────────────
-_PS_BTN_MAP = {
-    0:  0x1000,  # Croix (X)     → A
-    1:  0x2000,  # Rond  (O)     → B
-    2:  0x4000,  # Carré         → X
-    3:  0x8000,  # Triangle      → Y
-    8:  0x0020,  # Share/Create  → Back
-    9:  0x0010,  # Options       → Start
-    10: 0x0040,  # L3
-    11: 0x0080,  # R3
-    6:  0x0100,  # L1  (LB)
-    7:  0x0200,  # R1  (RB)
+
+# PS4 Raw — SDL pygame GameController (16 boutons, 6 axes, 0 hat)
+_PS4_BTN_MAP = {
+    0:  0x1000,  # Croix (X)       → A
+    1:  0x2000,  # Rond  (O)       → B
+    2:  0x4000,  # Carré           → X
+    3:  0x8000,  # Triangle        → Y
+    4:  0x0020,  # Share           → Back
+    5:  0x0400,  # Bouton PS       → Guide (bit étendu)
+    6:  0x0010,  # Options         → Start
+    7:  0x0040,  # L3
+    8:  0x0080,  # R3
+    9:  0x0100,  # L1 (LB)
+    10: 0x0200,  # R1 (RB)
+    # 11-14 : D-pad traité via boutons dans _poll_joystick (mode PS4)
+    15: 0x0800,  # Pavé tactile    → bit étendu
 }
+
+# Boutons D-pad spécifiques au mode PS4 (exposés comme boutons, pas hat)
+_PS4_DPAD_BTN = {
+    11: 0x0001,  # Haut
+    12: 0x0002,  # Bas
+    13: 0x0004,  # Gauche
+    14: 0x0008,  # Droite
+}
+
+# PS5 Raw — SDL joystick (13 boutons, 6 axes, 1 hat)
+_PS5_BTN_MAP = {
+    0:  0x1000,  # Croix (X)       → A
+    1:  0x2000,  # Rond  (O)       → B
+    2:  0x4000,  # Carré           → X
+    3:  0x8000,  # Triangle        → Y
+    4:  0x0100,  # L1 (LB)
+    5:  0x0200,  # R1 (RB)
+    # 6 & 7 : L2/R2 digitaux — redondants avec les axes 2/5, ignorés
+    8:  0x0020,  # Create          → Back
+    9:  0x0010,  # Options         → Start
+    10: 0x0400,  # Bouton PS       → Guide (bit étendu)
+    11: 0x0040,  # L3
+    12: 0x0080,  # R3
+    13: 0x0800,  # Pavé tactile    → bit étendu (présent sur certains modèles)
+}
+
+
+def _detect_ps_mode(joy):
+    """
+    Retourne 'ps4', 'ps5' ou 'generic' selon le nom SDL du joystick.
+    Le nom est en minuscules pour la comparaison.
+    """
+    try:
+        name = joy.get_name().lower()
+    except Exception:
+        return "generic"
+
+    if "ps5" in name or "dualsense" in name or "wireless controller" in name:
+        return "ps5"
+    if "ps4" in name or "dualshock 4" in name or "ps4 controller" in name:
+        return "ps4"
+    return "generic"
+
 
 def _ensure_joy():
     global _joy_initialized
@@ -85,10 +149,8 @@ def _ensure_joy():
             return False
     return True
 
-# ── CORRECTIF PRINCIPAL : cache du joystick ───────────────────────────────
-# BUG ORIGINAL : `_pg.joystick.Joystick(0)` était recréé à CHAQUE appel.
-# SDL réinitialise alors l'objet et renvoie des états à zéro.
-# Solution : instancier une seule fois et réutiliser l'objet.
+
+# ── Cache du joystick ─────────────────────────────────────────────────────────
 _cached_joy = None
 _cached_joy_count = 0
 
@@ -100,13 +162,11 @@ def _get_joy():
 
     count = _pg.joystick.get_count()
 
-    # Manette débranchée → on vide le cache
     if count == 0:
         _cached_joy = None
         _cached_joy_count = 0
         return None
 
-    # Nouvelle manette branchée (ou premier accès) → on (ré)initialise
     if _cached_joy is None or count != _cached_joy_count:
         try:
             joy = _pg.joystick.Joystick(0)
@@ -120,16 +180,13 @@ def _get_joy():
     return _cached_joy
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _norm_trigger(val: float) -> float:
     """
     Normalise une gâchette analogique en [0.0, 1.0].
-
-    Deux comportements selon le driver SDL :
+    Gère les deux conventions SDL :
       • Repos à -1.0  → plage -1 … +1  →  (val + 1) / 2
-      • Repos à  0.0  → plage  0 … +1  →  val  (utilisé directement)
-
-    La branche est choisie sur le signe de val : si val < 0 le driver
-    utilise bien la convention -1/+1 ; sinon on est déjà en 0/+1.
+      • Repos à  0.0  → plage  0 … +1  →  val
     """
     if val < 0.0:
         return (val + 1.0) / 2.0
@@ -146,51 +203,82 @@ def _poll_joystick():
     if joy is None:
         return None
 
+    mode = _detect_ps_mode(joy)
     st = XINPUT_STATE()
     gp = st.Gamepad
 
-    # 1. BOUTONS
     w = 0
     num_btns = joy.get_numbuttons()
-    for ps_idx, x_mask in _PS_BTN_MAP.items():
-        if ps_idx < num_btns and joy.get_button(ps_idx):
-            w |= x_mask
 
-    # 2. D-PAD (Hat)
-    if joy.get_numhats() > 0:
-        hx, hy = joy.get_hat(0)
-        if hy ==  1: w |= 0x0001  # Haut
-        if hy == -1: w |= 0x0002  # Bas
-        if hx == -1: w |= 0x0004  # Gauche
-        if hx ==  1: w |= 0x0008  # Droite
+    # ── Sélection du mapping selon le mode ───────────────────────────────────
+    if mode == "ps4":
+        # Boutons principaux
+        for ps_idx, x_mask in _PS4_BTN_MAP.items():
+            if ps_idx < num_btns and joy.get_button(ps_idx):
+                w |= x_mask
+        # D-pad en boutons (mode PS4)
+        for ps_idx, x_mask in _PS4_DPAD_BTN.items():
+            if ps_idx < num_btns and joy.get_button(ps_idx):
+                w |= x_mask
+
+    elif mode == "ps5":
+        # Boutons principaux
+        for ps_idx, x_mask in _PS5_BTN_MAP.items():
+            if ps_idx < num_btns and joy.get_button(ps_idx):
+                w |= x_mask
+        # D-pad via Hat (mode PS5)
+        if joy.get_numhats() > 0:
+            hx, hy = joy.get_hat(0)
+            if hy ==  1: w |= 0x0001  # Haut
+            if hy == -1: w |= 0x0002  # Bas
+            if hx == -1: w |= 0x0004  # Gauche
+            if hx ==  1: w |= 0x0008  # Droite
+
+    else:
+        # Fallback générique (layout "Raw variante B" d'origine)
+        _GENERIC_BTN_MAP = {
+            0:  0x1000,  # Croix
+            1:  0x2000,  # Rond
+            2:  0x4000,  # Carré
+            3:  0x8000,  # Triangle
+            6:  0x0100,  # L1
+            7:  0x0200,  # R1
+            8:  0x0020,  # Share/Create
+            9:  0x0010,  # Options
+            10: 0x0040,  # L3
+            11: 0x0080,  # R3
+            12: 0x0400,  # PS
+            13: 0x0800,  # Touchpad
+        }
+        for ps_idx, x_mask in _GENERIC_BTN_MAP.items():
+            if ps_idx < num_btns and joy.get_button(ps_idx):
+                w |= x_mask
+        # D-pad via Hat (fallback)
+        if joy.get_numhats() > 0:
+            hx, hy = joy.get_hat(0)
+            if hy ==  1: w |= 0x0001
+            if hy == -1: w |= 0x0002
+            if hx == -1: w |= 0x0004
+            if hx ==  1: w |= 0x0008
 
     gp.wButtons = w
 
-    # 3. AXES
+    # ── Axes (communs PS4 / PS5 Raw : LX=0, LY=1, L2=2, RX=3, RY=4, R2=5) ─
     def get_ax(i):
         return joy.get_axis(i) if i < joy.get_numaxes() else 0.0
 
-    # Stick gauche — identique sur toutes les variantes
     gp.sThumbLX = int(max(-32768, min(32767,  get_ax(0) * 32767)))
     gp.sThumbLY = int(max(-32768, min(32767, -get_ax(1) * 32767)))
 
     n = joy.get_numaxes()
 
     if n >= 6:
-        # Ordre réel SDL/pygame en mode Raw (DS4/DualSense) :
-        #   0=LX  1=LY  2=L2  3=RX  4=RY  5=R2
         gp.sThumbRX = int(max(-32768, min(32767,  get_ax(3) * 32767)))
         gp.sThumbRY = int(max(-32768, min(32767, -get_ax(4) * 32767)))
-
-        # ── CORRECTIF GÂCHETTES ──────────────────────────────────────────────
-        # Certains drivers renvoient -1→+1 (repos=-1), d'autres 0→+1 (repos=0).
-        # _norm_trigger() gère les deux automatiquement.
-        # ─────────────────────────────────────────────────────────────────────
         gp.bLeftTrigger  = int(_norm_trigger(get_ax(2)) * 255)
         gp.bRightTrigger = int(_norm_trigger(get_ax(5)) * 255)
-
     elif n >= 4:
-        # Fallback : manettes génériques 4 axes (RX=2, RY=3, pas de gâchettes)
+        # Fallback : manettes génériques 4 axes
         gp.sThumbRX = int(max(-32768, min(32767,  get_ax(2) * 32767)))
         gp.sThumbRY = int(max(-32768, min(32767, -get_ax(3) * 32767)))
 
@@ -215,13 +303,15 @@ def print_raw_state():
     """
     Lance une boucle de debug dans le terminal.
     Lance avec :  python gamepad_state.py
-    Affiche en temps réel les indices/valeurs bruts de tous les axes et boutons,
-    ce qui permet de corriger le mapping si besoin.
+    Affiche en temps réel :
+      - Le nom SDL et le mode détecté (ps4 / ps5 / generic)
+      - Les indices/valeurs bruts de tous les axes, boutons et hats
     """
     import time
     if not _ensure_joy():
         print("pygame non disponible."); return
     print("En attente d'une manette… (Ctrl+C pour quitter)")
+    last_mode = None
     while True:
         try:
             _pg.event.pump()
@@ -231,6 +321,12 @@ def print_raw_state():
         if joy is None:
             print("\r  [aucune manette]", end="", flush=True)
             time.sleep(0.2); continue
+
+        mode = _detect_ps_mode(joy)
+        if mode != last_mode:
+            print(f"\n>>> Manette détectée : '{joy.get_name()}' → mode={mode}")
+            last_mode = mode
+
         axes = [round(joy.get_axis(i), 3) for i in range(joy.get_numaxes())]
         btns = [joy.get_button(i) for i in range(joy.get_numbuttons())]
         hats = [joy.get_hat(i) for i in range(joy.get_numhats())]
