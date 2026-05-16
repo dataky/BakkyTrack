@@ -13,3 +13,4 @@ class AppSignals(QObject):
     trigger_sound    = pyqtSignal(str)
     press_key_sig    = pyqtSignal(str, float)
     game_phase_changed = pyqtSignal(str)
+    ball_speed_updated = pyqtSignal(float)   # vitesse balle en km/h
