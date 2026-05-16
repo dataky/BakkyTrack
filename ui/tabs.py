@@ -527,6 +527,61 @@ class OverlayTab(QWidget):
             style_row.addWidget(b); self._ctrl_style_btns[mode_key] = b
         ctl.addLayout(style_row); ctl.addWidget(lbl("Déplaçable en jeu.", C_MUTE, 8))
         root.addWidget(ctrl_card)
+
+        # Vitesse balle en temps réel
+        ball_card = card()
+        bll = QVBoxLayout(ball_card); bll.setContentsMargins(16, 12, 16, 14); bll.setSpacing(6)
+        bll.addWidget(lbl("VITESSE DE LA BALLE (EN JEU)", C_MUTE, 9))
+        ball_inner = QHBoxLayout(); ball_inner.setSpacing(10)
+        self._ball_speed_val = QLabel("—")
+        self._ball_speed_val.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+        self._ball_speed_val.setStyleSheet(
+            "color:#4FC3F7;font-size:28px;font-weight:700;background:transparent;"
+        )
+        self._ball_speed_unit = lbl("km/h", "#4FC3F7", 12)
+        self._ball_speed_unit.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
+        ball_inner.addStretch()
+        ball_inner.addWidget(self._ball_speed_val)
+        ball_inner.addWidget(self._ball_speed_unit)
+        ball_inner.addStretch()
+        bll.addLayout(ball_inner)
+        self._ball_speed_bar = QProgressBar()
+        self._ball_speed_bar.setRange(0, 216); self._ball_speed_bar.setValue(0)
+        self._ball_speed_bar.setTextVisible(False); self._ball_speed_bar.setFixedHeight(6)
+        self._ball_speed_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._ball_speed_bar.setStyleSheet("""
+            QProgressBar { border: none; background: #1A2A35; border-radius: 3px; }
+            QProgressBar::chunk { background: #4FC3F7; border-radius: 3px; }
+        """)
+        bll.addWidget(self._ball_speed_bar)
+        bll.addWidget(lbl("Max absolu : 216 km/h  ·  Supersonique voiture : 79 km/h  ·  Boost max voiture : 83 km/h", C_MUTE, 8))
+        bll.addWidget(hsep())
+
+        # Toggle overlay flottant
+        self._ball_overlay_active = False
+        self._ball_overlay_win    = None
+        self._ball_ovl_btn = btn("⚽  ACTIVER L'OVERLAY VITESSE BALLE", bg=C_BG3, fg=C_TEXT, size=11)
+        self._ball_ovl_btn.setFixedHeight(40)
+        self._ball_ovl_btn.clicked.connect(self._toggle_ball_overlay)
+        bll.addWidget(self._ball_ovl_btn)
+
+        # Slider taille
+        size_row = QHBoxLayout(); size_row.setSpacing(8)
+        size_row.addWidget(lbl("Taille :", C_TEXT, 10))
+        self._ball_size_slider = QSlider(Qt.Orientation.Horizontal)
+        self._ball_size_slider.setRange(14, 72)
+        self._ball_size_slider.setValue(self.app.config.get("ball_overlay_font_size", 28))
+        self._ball_size_slider.setFixedHeight(20)
+        self._ball_size_slider.valueChanged.connect(self._on_ball_overlay_size)
+        size_row.addWidget(self._ball_size_slider, 1)
+        self._ball_size_lbl = lbl(f"{self.app.config.get('ball_overlay_font_size', 28)}pt", C_MUTE, 9)
+        size_row.addWidget(self._ball_size_lbl)
+        bll.addLayout(size_row)
+        bll.addWidget(lbl("Déplaçable en jeu.", C_MUTE, 8))
+
+        root.addWidget(ball_card)
+        self.app.signals.ball_speed_updated.connect(self._on_ball_speed)
+
         root.addStretch()
 
         saved_mode = self.app.config.get("overlay_mode", "compact")
@@ -597,6 +652,38 @@ class OverlayTab(QWidget):
         for m, b in self._mmr_btns.items():
             active = m == mode
             b.setStyleSheet(f"QPushButton{{background:{C_BLUE if active else C_BG3};color:{C_TEXT if active else C_MUTE};border:none;border-radius:4px;padding:5px 12px;font-size:10px;font-weight:700;}}{'' if active else 'QPushButton:hover{color:' + C_TEXT + ';}'}")
+
+    def _toggle_ball_overlay(self):
+        from ui.ball_speed_overlay import BallSpeedOverlay
+        self._ball_overlay_active = not self._ball_overlay_active
+        if self._ball_overlay_active:
+            if self._ball_overlay_win is None:
+                self._ball_overlay_win = BallSpeedOverlay(self.app.signals, self.app.config)
+            self._ball_overlay_win.show()
+            self._ball_ovl_btn.setText("⚽  DÉSACTIVER L'OVERLAY VITESSE BALLE")
+            self._ball_ovl_btn.setStyleSheet(
+                f"QPushButton{{background:{C_ORG};color:{C_TEXT};border:none;border-radius:4px;"
+                f"padding:5px 12px;font-size:11px;font-weight:700;}}QPushButton:hover{{background:#e06000;}}"
+            )
+        else:
+            if self._ball_overlay_win:
+                self._ball_overlay_win.hide()
+            self._ball_ovl_btn.setText("⚽  ACTIVER L'OVERLAY VITESSE BALLE")
+            self._ball_ovl_btn.setStyleSheet(
+                f"QPushButton{{background:{C_BG3};color:{C_TEXT};border:none;border-radius:4px;"
+                f"padding:5px 12px;font-size:11px;font-weight:700;}}QPushButton:hover{{background:{C_BG3}cc;}}"
+            )
+
+    def _on_ball_overlay_size(self, value: int):
+        self._ball_size_lbl.setText(f"{value}pt")
+        self.app.config["ball_overlay_font_size"] = value
+        if self._ball_overlay_win:
+            self._ball_overlay_win.set_font_size(value)
+
+    def _on_ball_speed(self, kmh: float):
+        self._ball_speed_val.setText(f"{kmh:.0f}")
+        # Barre : 100 km/h = pleine barre (vitesse max balle ~95 km/h)
+        self._ball_speed_bar.setValue(min(216, int(kmh)))
 
     def _on_peak_toggle(self, state):
         show = bool(state); self.app.config["tab_show_peak"] = show
