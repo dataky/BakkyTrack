@@ -3,9 +3,12 @@
 # IMPORTANT — intégration avec un overlay / boucle pygame existante :
 #
 #   Dans ta boucle principale, appelle UNE FOIS par frame :
-#       gamepad_state.pump()          ← met à jour l'état SDL2
+#       gamepad_state.pump()          ← met à jour l'état pygame (fallback joystick)
 #   Puis autant de fois que tu veux :
 #       st = gamepad_state.get_gamepad_state()
+#
+#   Si tu utilises uniquement le backend dualsense-controller (DualSense PS5),
+#   pump() n'est pas nécessaire — la lib tourne dans son propre thread.
 #
 #   Si tu as déjà pygame.event.get() ou pygame.event.pump() dans ta boucle,
 #   tu n'as PAS besoin d'appeler gamepad_state.pump() en plus.
@@ -14,6 +17,166 @@ import ctypes, sys, os
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+
+# ── 0. dualsense-controller (PS5 DualSense natif — priorité maximale) ────────
+#
+#   pip install dualsense-controller
+#
+#   Ce backend lit directement le HID USB/Bluetooth de la DualSense sans
+#   passer par XInput ni SDL2. Il fonctionne sur Windows, macOS et Linux
+#   (udev rules requises sur Linux : voir README du projet).
+#
+#   Mapping utilisé : Mapping.NORMALIZED
+#       sticks   → float  -1.0 .. 1.0   (Y déjà inversé par la lib)
+#       triggers → float   0.0 .. 1.0
+#       boutons  → bool    .pressed
+#
+#   La lib tourne dans un thread interne ; on lit juste la dernière valeur
+#   disponible à chaque frame — aucun appel bloquant.
+
+try:
+    from dualsense_controller import DualSenseController as _DSC
+    from dualsense_controller.api.DualSenseController import Mapping as _DSCMapping
+    _HAS_DSC = True
+except (ImportError, OSError):
+    # ImportError : dualsense-controller pas installé
+    # OSError     : hidapi DLL/SO introuvable (pip install hidapi)
+    _DSC = _DSCMapping = None
+    _HAS_DSC = False
+
+_dsc_instance: "_DSC | None" = None
+_dsc_active   = False
+
+def _dsc_init() -> bool:
+    """Tente d'activer la DualSense via dualsense-controller. Idempotent."""
+    global _dsc_instance, _dsc_active
+    if not _HAS_DSC:
+        return False
+    if _dsc_active and _dsc_instance is not None and _dsc_instance.is_active:
+        return True
+    try:
+        # Vérifie qu'au moins un DualSense est détecté avant d'instancier
+        devs = _DSC.enumerate_devices()
+        if not devs:
+            return False
+        if _dsc_instance is not None:
+            try:
+                _dsc_instance.deactivate()
+            except Exception:
+                pass
+        _dsc_instance = _DSC(
+            mapping=_DSCMapping.NORMALIZED,   # sticks -1..1, triggers 0..1
+            left_joystick_deadzone=0,
+            right_joystick_deadzone=0,
+            left_trigger_deadzone=0,
+            right_trigger_deadzone=0,
+        )
+        _dsc_instance.activate()
+        _dsc_active = True
+        return True
+    except Exception:
+        _dsc_instance = None
+        _dsc_active   = False
+        return False
+
+def _poll_dualsense() -> "XINPUT_STATE | None":
+    """
+    Lit l'état courant de la DualSense via dualsense-controller et le
+    retourne sous forme de XINPUT_STATE normalisé.
+
+    Les sticks sont en float -1..1 (NORMALIZED) → convertis en int16.
+    Les triggers sont en float 0..1 → convertis en uint8.
+    Le Y des sticks est déjà inversé par la lib (haut = positif).
+    """
+    if not _dsc_init():
+        return None
+    dc = _dsc_instance
+    if dc is None or not dc.is_active:
+        return None
+    try:
+        st = XINPUT_STATE()
+        gp = st.Gamepad
+
+        # ── Boutons face ──────────────────────────────────────────────
+        w = 0
+        if dc.btn_cross.pressed:    w |= 0x1000  # A
+        if dc.btn_circle.pressed:   w |= 0x2000  # B
+        if dc.btn_square.pressed:   w |= 0x4000  # X
+        if dc.btn_triangle.pressed: w |= 0x8000  # Y
+
+        # ── Boutons épaules ───────────────────────────────────────────
+        if dc.btn_l1.pressed:       w |= 0x0100  # LB
+        if dc.btn_r1.pressed:       w |= 0x0200  # RB
+
+        # ── Sticks (click) ────────────────────────────────────────────
+        if dc.btn_l3.pressed:       w |= 0x0040  # L3
+        if dc.btn_r3.pressed:       w |= 0x0080  # R3
+
+        # ── Boutons système ───────────────────────────────────────────
+        if dc.btn_create.pressed:   w |= 0x0020  # Create/Share → Back
+        if dc.btn_options.pressed:  w |= 0x0010  # Options      → Start
+        if dc.btn_ps.pressed:       w |= 0x0400  # PS Logo      → Guide
+
+        # ── D-Pad ─────────────────────────────────────────────────────
+        if dc.btn_up.pressed:       w |= 0x0001
+        if dc.btn_down.pressed:     w |= 0x0002
+        if dc.btn_left.pressed:     w |= 0x0004
+        if dc.btn_right.pressed:    w |= 0x0008
+
+        gp.wButtons = w
+
+        # ── Sticks analogiques (NORMALIZED : -1.0 .. 1.0) ────────────
+        def _stick(v: float) -> int:
+            return int(max(-32768, min(32767, v * 32767)))
+
+        lx = dc.left_stick_x.value  or 0.0
+        ly = dc.left_stick_y.value  or 0.0   # déjà "haut = positif" en NORMALIZED
+        rx = dc.right_stick_x.value or 0.0
+        ry = dc.right_stick_y.value or 0.0
+
+        gp.sThumbLX =  _stick(lx)
+        gp.sThumbLY =  _stick(ly)   # pas de réinversion : NORMALIZED le fait
+        gp.sThumbRX =  _stick(rx)
+        gp.sThumbRY =  _stick(ry)
+
+        # ── Gâchettes analogiques (NORMALIZED : 0.0 .. 1.0) ──────────
+        def _trig(v: float) -> int:
+            return int(max(0, min(255, (v or 0.0) * 255)))
+
+        gp.bLeftTrigger  = _trig(dc.left_trigger.value)
+        gp.bRightTrigger = _trig(dc.right_trigger.value)
+
+        st.dwPacketNumber = 1
+        return st
+
+    except Exception:
+        # Connexion perdue : on réinitialise au prochain appel
+        global _dsc_active
+        _dsc_active = False
+        return None
+
+def dsc_set_lightbar(r: int, g: int, b: int) -> None:
+    """
+    Change la couleur de la lightbar de la DualSense (0-255 par canal).
+    N'a aucun effet si la manette n'est pas connectée via ce backend.
+    """
+    if _dsc_instance is not None and _dsc_instance.is_active:
+        try:
+            _dsc_instance.lightbar.set_color(r, g, b)
+        except Exception:
+            pass
+
+def dsc_set_rumble(left: int, right: int) -> None:
+    """
+    Déclenche un retour haptique (0-255 par moteur).
+    N'a aucun effet si la manette n'est pas connectée via ce backend.
+    """
+    if _dsc_instance is not None and _dsc_instance.is_active:
+        try:
+            _dsc_instance.left_rumble.set(left)
+            _dsc_instance.right_rumble.set(right)
+        except Exception:
+            pass
 
 # ── Structures XInput ────────────────────────────────────────────────────────
 
@@ -51,77 +214,20 @@ def _poll_xinput(user_index=0):
     st = XINPUT_STATE()
     return st if _xinput.XInputGetState(user_index, ctypes.byref(st)) == 0 else None
 
-# ── 2. pygame SDL2 Controller ────────────────────────────────────────────────
+# ── 2. pygame (joystick brut — fallback uniquement) ──────────────────────────
 
 try:
     import pygame as _pg
-    from pygame._sdl2 import controller as _sdl2ctrl
-    _HAS_SDL2 = True
+    _pg.init()
+    _pg.joystick.init()
+    _HAS_PG = True
 except ImportError:
-    _pg = _sdl2ctrl = None
-    _HAS_SDL2 = False
-
-_initialized = False
-_cached_ctrl = None
-
-# Constantes SDL2 (enum SDL_GameControllerButton / Axis)
-_CB_A=0; _CB_B=1; _CB_X=2; _CB_Y=3
-_CB_BACK=4; _CB_GUIDE=5; _CB_START=6
-_CB_L3=7; _CB_R3=8; _CB_LB=9; _CB_RB=10
-_CB_DUP=11; _CB_DDOWN=12; _CB_DLEFT=13; _CB_DRIGHT=14
-
-_CA_LX=0; _CA_LY=1; _CA_RX=2; _CA_RY=3; _CA_LT=4; _CA_RT=5
-
-_BTN_MASKS = {
-    _CB_DUP:   0x0001, _CB_DDOWN: 0x0002,
-    _CB_DLEFT: 0x0004, _CB_DRIGHT:0x0008,
-    _CB_BACK:  0x0020, _CB_START: 0x0010,
-    _CB_L3:    0x0040, _CB_R3:    0x0080,
-    _CB_LB:    0x0100, _CB_RB:    0x0200,
-    _CB_GUIDE: 0x0400,
-    _CB_A:     0x1000, _CB_B:     0x2000,
-    _CB_X:     0x4000, _CB_Y:     0x8000,
-}
-
-# Mappings additionnels pour SDL2 (PS4/PS5)
-# Injectés via add_mapping() — API correcte de pygame._sdl2.controller
-_PS_SDL2_MAPPINGS = [
-    # DualShock 4 (USB / Bluetooth)
-    "030000004c050000cc09000000000000,Sony DualShock 4,a:b0,b:b1,back:b4,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b5,leftshoulder:b9,leftstick:b7,lefttrigger:a4,leftx:a0,lefty:a1,rightshoulder:b10,rightstick:b8,righttrigger:a5,rightx:a2,righty:a3,start:b6,x:b2,y:b3,platform:Windows",
-    # DualSense (PS5)
-    "030000004c0500002669000000000000,Sony DualSense,a:b0,b:b1,back:b8,dpdown:h0.4,dpleft:h0.8,dpright:h0.2,dpup:h0.1,guide:b10,leftshoulder:b4,leftstick:b11,lefttrigger:a4,leftx:a0,lefty:a1,rightshoulder:b5,rightstick:b12,righttrigger:a5,rightx:a2,righty:a3,start:b9,x:b2,y:b3,platform:Windows",
-]
-
-def _load_ps_mappings_sdl2():
-    """
-    Ajoute les mappings PS4/PS5 via l'API correcte : add_mapping().
-    (ControllerMappingDB n'existe pas dans pygame._sdl2.controller)
-    """
-    if not _HAS_SDL2 or _sdl2ctrl is None:
-        return
-    for mapping in _PS_SDL2_MAPPINGS:
-        try:
-            _sdl2ctrl.add_mapping(mapping)
-        except Exception:
-            pass
-
-def _init():
-    global _initialized
-    if _initialized or not _HAS_SDL2:
-        return _HAS_SDL2
-    try:
-        _pg.init()
-        _pg.joystick.init()
-        _sdl2ctrl.init()
-        _load_ps_mappings_sdl2()
-        _initialized = True
-    except Exception:
-        pass
-    return _initialized
+    _pg = None
+    _HAS_PG = False
 
 def pump():
     """
-    Met à jour l'état SDL2 des manettes.
+    Met à jour l'état pygame des manettes (fallback joystick brut).
 
     Appelle cette fonction UNE FOIS par frame dans ta boucle principale,
     AVANT d'appeler get_gamepad_state().
@@ -136,69 +242,6 @@ def pump():
             _pg.event.pump()
         except Exception:
             pass
-
-def _get_ctrl():
-    """Cache du Controller SDL2. Ne touche PAS aux events."""
-    global _cached_ctrl
-    if not _init():
-        return None
-
-    if _cached_ctrl is not None:
-        try:
-            if _cached_ctrl.attached():
-                return _cached_ctrl
-        except Exception:
-            pass
-        _cached_ctrl = None
-
-    for i in range(_pg.joystick.get_count()):
-        try:
-            if not _sdl2ctrl.is_controller(i):
-                continue
-            joy  = _pg.joystick.Joystick(i)
-            ctrl = _sdl2ctrl.Controller.from_joystick(joy)
-            if ctrl.attached():
-                _cached_ctrl = ctrl
-                return ctrl
-        except Exception:
-            continue
-    return None
-
-def _poll_sdl2():
-    ctrl = _get_ctrl()
-    if ctrl is None:
-        return None
-
-    st = XINPUT_STATE()
-    gp = st.Gamepad
-
-    w = 0
-    for btn, mask in _BTN_MASKS.items():
-        try:
-            if ctrl.get_button(btn):
-                w |= mask
-        except Exception:
-            global _cached_ctrl
-            _cached_ctrl = None
-            return None
-    gp.wButtons = w
-
-    def ax(i):
-        try:    return ctrl.get_axis(i)
-        except: return 0
-
-    gp.sThumbLX =  ax(_CA_LX)
-    gp.sThumbLY = -ax(_CA_LY)   # Y inversé
-
-    gp.sThumbRX =  ax(_CA_RX)
-    gp.sThumbRY = -ax(_CA_RY)
-
-    # SDL2 controller: triggers retournent 0..32767 (pas -32768..32767)
-    gp.bLeftTrigger  = int(max(0, ax(_CA_LT)) * 255 // 32767)
-    gp.bRightTrigger = int(max(0, ax(_CA_RT)) * 255 // 32767)
-
-    st.dwPacketNumber = 1
-    return st
 
 # ── 3. Fallback joystick brut ────────────────────────────────────────────────
 #
@@ -369,70 +412,90 @@ def get_gamepad_state(user_index=0):
     """
     Retourne XINPUT_STATE ou None si aucune manette connectée.
 
+    Ordre de priorité des backends :
+      0. dualsense-controller  — DualSense PS5 via HID natif (pip install dualsense-controller)
+      1. XInput                — Windows uniquement, toutes manettes XInput
+      2. Joystick brut pygame  — fallback PS4/PS5 via pygame.joystick
+
     Assure-toi que pump() (ou pygame.event.get/pump) est appelé
     dans ta boucle principale AVANT cet appel.
     """
+    # 0. dualsense-controller (DualSense natif — multiplateforme)
+    st = _poll_dualsense()
+    if st is not None:
+        return st
+    # 1. XInput (Windows)
     if sys.platform == "win32":
         st = _poll_xinput(user_index)
         if st is not None:
             return st
-    st = _poll_sdl2()
-    if st is not None:
-        return st
+    # 2. Joystick brut (fallback PS4/PS5)
     return _poll_fallback()
 
 # ── Diagnostic ───────────────────────────────────────────────────────────────
 
 def print_raw_state():
     import time
-    if not _init() and _pg is None:
-        print("pygame non disponible.")
+    if not _HAS_PG and not _HAS_DSC:
+        print("Aucun backend disponible (pygame et dualsense-controller manquants).")
         return
     print("En attente d'une manette… (Ctrl+C pour quitter)\n")
     last_name = None
     while True:
         pump()
-        ctrl = _get_ctrl()
-        joy  = _get_joy_fb()
 
-        if ctrl is None and joy is None:
+        # ── Backend 0 : dualsense-controller ──────────────────────────
+        if _dsc_init() and _dsc_instance is not None and _dsc_instance.is_active:
+            dc = _dsc_instance
+            name = "DualSense [dualsense-controller]"
+            if name != last_name:
+                print(f"\n>>> '{name}'  mode=dualsense_controller")
+                last_name = name
+            try:
+                pressed = []
+                btns = {
+                    "Cross": dc.btn_cross, "Circle": dc.btn_circle,
+                    "Square": dc.btn_square, "Triangle": dc.btn_triangle,
+                    "L1": dc.btn_l1, "R1": dc.btn_r1,
+                    "L3": dc.btn_l3, "R3": dc.btn_r3,
+                    "Create": dc.btn_create, "Options": dc.btn_options,
+                    "PS": dc.btn_ps,
+                    "↑": dc.btn_up, "↓": dc.btn_down,
+                    "←": dc.btn_left, "→": dc.btn_right,
+                }
+                for label, btn in btns.items():
+                    if btn.pressed:
+                        pressed.append(label)
+                axes = {
+                    "LX": round(dc.left_stick_x.value or 0, 3),
+                    "LY": round(dc.left_stick_y.value or 0, 3),
+                    "RX": round(dc.right_stick_x.value or 0, 3),
+                    "RY": round(dc.right_stick_y.value or 0, 3),
+                    "LT": round(dc.left_trigger.value or 0, 3),
+                    "RT": round(dc.right_trigger.value or 0, 3),
+                }
+                print(f"\rAppuyés={pressed}  Axes={axes}   ", end="", flush=True)
+            except Exception as e:
+                print(f"\r[erreur lecture DualSense: {e}]", end="", flush=True)
+            time.sleep(0.05)
+            continue
+
+        # ── Backend 1/2 : XInput / joystick brut ──────────────────────
+        joy = _get_joy_fb()
+        if joy is None:
             print("\r[aucune manette]", end="", flush=True)
             time.sleep(0.2)
             continue
 
-        name = None
-        mode = ""
-        if ctrl:
-            try:
-                name = _sdl2ctrl.name_forindex(0)
-            except Exception:
-                name = "Unknown SDL2 Controller"
-            mode = "sdl2_controller"
-        elif joy:
-            name = joy.get_name()
-            mode = "joystick_fallback"
-
+        name = joy.get_name()
         if name != last_name:
-            print(f"\n>>> '{name}'  mode={mode}")
+            print(f"\n>>> '{name}'  mode=joystick_fallback")
             last_name = name
 
-        if ctrl:
-            labels = ["A","B","X","Y","BACK","GUIDE","START","L3","R3","LB","RB","↑","↓","←","→"]
-            pressed = [labels[i] for i in range(15) if ctrl.get_button(i)]
-            axes = {
-                "LX": round(ctrl.get_axis(0)/32767, 2),
-                "LY": round(ctrl.get_axis(1)/32767, 2),
-                "RX": round(ctrl.get_axis(2)/32767, 2),
-                "RY": round(ctrl.get_axis(3)/32767, 2),
-                "LT": round(ctrl.get_axis(4)/32767, 2),
-                "RT": round(ctrl.get_axis(5)/32767, 2),
-            }
-            print(f"\rAppuyés={pressed}  Axes={axes}   ", end="", flush=True)
-        else:
-            axes = [round(joy.get_axis(i), 3) for i in range(joy.get_numaxes())]
-            btns = [joy.get_button(i) for i in range(joy.get_numbuttons())]
-            hats = [joy.get_hat(i) for i in range(joy.get_numhats())]
-            print(f"\rAxes={axes}  Btns={btns}  Hats={hats}   ", end="", flush=True)
+        axes = [round(joy.get_axis(i), 3) for i in range(joy.get_numaxes())]
+        btns = [joy.get_button(i) for i in range(joy.get_numbuttons())]
+        hats = [joy.get_hat(i) for i in range(joy.get_numhats())]
+        print(f"\rAxes={axes}  Btns={btns}  Hats={hats}   ", end="", flush=True)
         time.sleep(0.05)
 
 if __name__ == "__main__":
