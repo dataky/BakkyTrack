@@ -20,6 +20,7 @@ from services.mmr import MMRService
 from services.sound import SoundService
 from utils import (
     _key_display, _key_to_vk, SvgBackground, ResultOverlay, _github_auto_update,
+    enforce_topmost,
 )
 from ui.tabs import TrackerTab, PlayersTab, OverlayTab, AutomationTab, SoundTab, SettingsTab
 from ui.ingame_overlay import InGameMMROverlay
@@ -295,9 +296,9 @@ class MainApp(QMainWindow):
         my_pid = self.match.detected_player_primary_id
         self.sound.fetch_players_for_ingame(players, my_pid, self._mmrsvc_to_ingame_entry)
 
+    @property
     def _ingame_stats_cache(self):
         return self.sound.ingame_stats_cache
-    _ingame_stats_cache = property(_ingame_stats_cache)
 
     def _push_ingame_overlay(self):
         if not self.ingame_mmr_overlay.isVisible(): return
@@ -417,7 +418,7 @@ class MainApp(QMainWindow):
                     app._sse_clients.append(self.wfile)
                     try:
                         while True:
-                            import time; time.sleep(15)
+                            time.sleep(15)
                             self.wfile.write(b": keepalive\n\n"); self.wfile.flush()
                     except Exception: pass
                     finally:

@@ -9,6 +9,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QDesktopServices
 from style import C_BG3, C_BLUE, C_ORG, C_TEXT, C_MUTE, card, lbl
 from overlay_widgets import _GlassCard
+from utils import enforce_topmost
+from config import platform_from_id, id_from_primary_id, PLATFORM_SLUGS
 
 
 class PlayersOverlayWindow(QMainWindow):
@@ -67,15 +69,7 @@ class PlayersOverlayWindow(QMainWindow):
         super().showEvent(e); self._enforce_topmost()
 
     def _enforce_topmost(self):
-        if sys.platform != "win32" or not self.isVisible(): return
-        try:
-            import ctypes
-            hwnd = int(self.winId())
-            ctypes.windll.user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003)
-            GWL_EXSTYLE = -20
-            ex = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex | 0x00080000 | 0x08000000)
-        except Exception: pass
+        enforce_topmost(self)
 
     def _clear_plist(self):
         while self._plist.count():
@@ -90,7 +84,7 @@ class PlayersOverlayWindow(QMainWindow):
 
     _TRACKER_COOLDOWN_S = 3
     _tracker_last_open: dict = {}
-    _URL_SLUG = {"epic": "epic", "steam": "steam", "ps4": "psn", "xbox": "xbl", "switch": "switch"}
+    _URL_SLUG = PLATFORM_SLUGS
 
     def update_players(self, players):
         self._players = players; self._clear_plist()
@@ -119,15 +113,10 @@ class PlayersOverlayWindow(QMainWindow):
         self.adjustSize()
 
     def _platform_from_id(self, primary_id):
-        if primary_id.startswith("Steam|"): return "steam"
-        if primary_id.startswith("Epic|"): return "epic"
-        if primary_id.startswith("PS4|"): return "ps4"
-        if primary_id.startswith("XboxOne|"): return "xbox"
-        if primary_id.startswith("Switch|"): return "switch"
-        return "epic"
+        return platform_from_id(primary_id)
 
     def _id_from_primary_id(self, primary_id):
-        parts = primary_id.split("|"); return parts[1] if len(parts) >= 2 else primary_id
+        return id_from_primary_id(primary_id)
 
     def _open_profile(self, user_id, platform):
         now = time.time(); last = self._tracker_last_open.get(user_id, 0)

@@ -1,6 +1,6 @@
 """services/mmr.py — MMRService : tracker.gg HTTP."""
 import os, time, json, threading, urllib.parse, urllib.request, urllib.error
-from config import BASE_DIR, SSL_CTX, PLAYLIST_NAMES
+from config import BASE_DIR, SSL_CTX, PLAYLIST_NAMES, RANKS, TRACKER_HEADERS, PLATFORM_SLUGS
 from signals import AppSignals
 
 
@@ -9,24 +9,11 @@ class MMRService:
     _MAX_RETRIES = 3
     _RETRY_WAIT  = 4
 
-    _RANKS = [
-        "Unranked",
-        "Bronze I", "Bronze II", "Bronze III",
-        "Silver I", "Silver II", "Silver III",
-        "Gold I", "Gold II", "Gold III",
-        "Platinum I", "Platinum II", "Platinum III",
-        "Diamond I", "Diamond II", "Diamond III",
-        "Champion I", "Champion II", "Champion III",
-        "Grand Champion I", "Grand Champion II", "Grand Champion III",
-        "Supersonic Legend",
-    ]
+    _RANKS = RANKS
 
     _PLAYLIST_IDS = {10: "1v1", 11: "2v2", 13: "3v3"}
 
-    _PLATFORM_SLUG = {
-        "epic": "epic", "steam": "steam",
-        "ps4": "psn", "xbox": "xbl", "switch": "switch",
-    }
+    _PLATFORM_SLUG = PLATFORM_SLUGS
 
     def __init__(self, config, signals: AppSignals):
         self.config            = config
@@ -119,19 +106,7 @@ class MMRService:
                f"/{slug}/{encoded}")
         for attempt in range(1, self._MAX_RETRIES + 1):
             try:
-                req = urllib.request.Request(url, headers={
-                    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                   "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                   "Chrome/124.0.0.0 Safari/537.36"),
-                    "Accept": "application/json, text/plain, */*",
-                    "Accept-Language": "en-US,en;q=0.9",
-                    "Referer": "https://rocketleague.tracker.network/",
-                    "Origin": "https://rocketleague.tracker.network",
-                    "Connection": "keep-alive",
-                    "sec-fetch-site": "same-site",
-                    "sec-fetch-mode": "cors",
-                    "sec-fetch-dest": "empty",
-                })
+                req = urllib.request.Request(url, headers=TRACKER_HEADERS)
                 self.signals.log_event.emit(
                     f"[MMR] Tentative {attempt}/{self._MAX_RETRIES}"
                     f" — {username} ({slug})…")

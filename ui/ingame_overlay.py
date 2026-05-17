@@ -3,7 +3,7 @@ import math
 from PyQt6.QtCore    import Qt, QPointF, QRectF, QTimer
 from PyQt6.QtWidgets import QMainWindow, QWidget, QLabel, QApplication
 from PyQt6.QtGui     import QPainter, QColor, QFont, QPixmap
-from utils import get_rank_pixmap, get_playlist_pixmap, _PLAYLIST_ID_TO_KEY
+from utils import get_rank_pixmap, get_playlist_pixmap, _PLAYLIST_ID_TO_KEY, enforce_topmost
 
 
 class InGameMMROverlay(QMainWindow):
@@ -57,12 +57,7 @@ class InGameMMROverlay(QMainWindow):
         self._refresh_timer.stop()
 
     def _enforce_topmost(self):
-        if not self.isVisible(): return
-        try:
-            import ctypes
-            hwnd = int(self.winId())
-            ctypes.windll.user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003)
-        except Exception: pass
+        enforce_topmost(self)
 
     def set_data(self, players: list, stats: dict, playlist_key: str,
                  rank_mode: str = "", game_state: dict = None):

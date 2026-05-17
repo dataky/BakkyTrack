@@ -1,5 +1,5 @@
-"""utils.py — Icônes, SVG, overlays globaux, auto-updater, VK keys."""
-import os, sys, time, math, urllib.parse, urllib.request, urllib.error, json, hashlib, threading
+"""utils.py — Icônes, SVG, overlays globaux, auto-updater, VK keys, helpers partagés."""
+import os, sys, time, urllib.parse, urllib.request, urllib.error, json, hashlib, threading
 from config import BASE_DIR, SSL_CTX, SSL_CTX_NOVERIFY
 
 # ── VK key map ──────────────────────────────────────────────────────────
@@ -196,6 +196,65 @@ class SvgBackground(QWidget):
 
     def add_widget(self, w):
         self._inner_lay.addWidget(w)
+
+
+# ── enforce_topmost (utilitaire partagé par les overlays) ────────────────
+def enforce_topmost(widget, clickthrough=False):
+    """Force une fenêtre Qt au-dessus de tout (y compris les jeux plein écran).
+    Si clickthrough=True, ajoute aussi le flag WS_EX_TRANSPARENT.
+    """
+    if sys.platform != "win32" or not widget.isVisible():
+        return
+    try:
+        import ctypes
+        hwnd = int(widget.winId())
+        ctypes.windll.user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003)
+        GWL_EXSTYLE = -20
+        ex = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        flags = ex | 0x00080000 | 0x08000000  # WS_EX_LAYERED | WS_EX_NOACTIVATE
+        if clickthrough:
+            flags |= 0x00000008  # WS_EX_TOPMOST passthrough
+        ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, flags)
+    except Exception:
+        pass
+
+
+# ── OverlayStats (helper pour les widgets overlay) ────────────────────
+class OverlayStats:
+    """Parse un dict de stats brutes en attributs typés.
+    Évite la duplication du même parsing dans 12+ widgets overlay."""
+    __slots__ = ('mmr', 'chg', 'sv', 'st', 'wins', 'losses', 'total', 'winrate', 'wr_pct')
+
+    def __init__(self, d: dict):
+        self.mmr    = d.get("mmr")
+        self.chg    = d.get("mmr_change", 0)
+        self.sv     = d.get("streak_val", 0)
+        self.st     = d.get("streak_type", "")
+        self.wins   = d.get("wins", 0)
+        self.losses = d.get("losses", 0)
+        self.total  = self.wins + self.losses
+        self.winrate = (self.wins / self.total) if self.total > 0 else 0.5
+        self.wr_pct  = f"{self.wins / self.total * 100:.0f}%" if self.total > 0 else "--%"
+
+    def mmr_text(self, mmr_mode: str) -> str:
+        if mmr_mode == "delta":
+            return ""
+        return str(self.mmr) if self.mmr else "--"
+
+    def delta_text(self, mmr_mode: str) -> tuple:
+        """Retourne (text, color) pour le delta MMR."""
+        if self.chg and mmr_mode != "mmr":
+            sign = "+" if self.chg > 0 else ""
+            clr  = "#00e676" if self.chg > 0 else "#ff3d57"
+            return f"{sign}{self.chg}", clr
+        return "", None
+
+    def streak_text(self) -> tuple:
+        """Retourne (text, color) pour le streak."""
+        if self.sv > 0:
+            clr = "#00e676" if self.st == "win" else "#ff3d57"
+            return f"{'+'if self.st=='win'else'-'}{self.sv}", clr
+        return "--", None
 
 
 # ── ResultOverlay ────────────────────────────────────────────────────────

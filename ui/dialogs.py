@@ -6,14 +6,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QCursor
 from style import C_BG2, C_BG3, C_BLUE, C_TEXT, C_MUTE, C_ORG, card, btn
 from utils import _QT_KEY_MAP, _key_display, _VK_MAP
-
-# ── Import de get_gamepad_state ──────────────────────────────────────────
-import sys as _sys, os as _os
-_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-if _ROOT not in _sys.path:
-    _sys.path.insert(0, _ROOT)
 from gamepad_state import get_gamepad_state
-# ────────────────────────────────────────────────────────────────────────
 
 
 # ── KeyCaptureDialog ─────────────────────────────────────────────────────

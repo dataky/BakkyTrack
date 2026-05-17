@@ -34,7 +34,6 @@ def main():
     font = app.font(); font.setFamily("Segoe UI"); font.setPointSize(10)
     app.setFont(font)
 
-    import base64
     icon = None
     for name in ["logo.png", "logo.ico", "logo.jpg", "logo.jpeg", "logo.bmp", "logo.webp"]:
         candidate = os.path.join(BASE_DIR, name)
@@ -42,6 +41,7 @@ def main():
             px = QPixmap(candidate)
             if not px.isNull(): icon = QIcon(px); break
     if icon is None:
+        import base64
         px = QPixmap(); px.loadFromData(base64.b64decode(DEFAULT_ICON_B64))
         if not px.isNull(): icon = QIcon(px)
     if icon: app.setWindowIcon(icon)

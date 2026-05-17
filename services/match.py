@@ -91,76 +91,77 @@ class MatchService:
         self.start()
 
     def _loop(self):
-        port = self.config["statsapi_port"]
-        self.signals.status_changed.emit("", f"Connexion StatsAPI port {port}…")
-        sock = None
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
-            sock.connect(("127.0.0.1", port))
-            sock.settimeout(None)
-            self._tcp_sock = sock
-            self.signals.status_changed.emit("connected", f"StatsAPI connecté · port {port}")
-            buf = b""
-            while self._running:
-                try:    chunk = sock.recv(4096)
-                except OSError: break
-                if not chunk: break
-                buf += chunk
-                while buf:
-                    start = buf.find(b"{")
-                    if start == -1: buf = b""; break
-                    buf = buf[start:]
-                    depth = end = 0; in_str = escaped = False
-                    for i, bv in enumerate(buf):
-                        if escaped:          escaped = False; continue
-                        if bv == _B_BACKSLASH and in_str: escaped = True; continue
-                        if bv == _B_QUOTE:   in_str = not in_str; continue
-                        if in_str:           continue
-                        if bv == _B_OPEN:    depth += 1
-                        elif bv == _B_CLOSE:
-                            depth -= 1
-                            if depth == 0: end = i; break
-                    if end == 0 and depth != 0: break
-                    msg = buf[:end + 1]; buf = buf[end + 1:]
-                    try:
-                        _now = time.monotonic()
-                        _is_update = b'"UpdateState"' in msg[:60]
-                        if not _is_update or (_now - self._last_update_log_t) >= 1.0:
-                            _decoded = msg.decode(errors="replace")
-                            self.signals.log_event.emit(_decoded[:80])
-                            if _is_update:
-                                self._last_update_log_t = _now
-                    except RuntimeError:
-                        return
-                    try:
-                        self._process_event(json.loads(msg))
-                    except Exception as e:
-                        try: self.signals.log_event.emit(f"ERR parse: {e}")
-                        except RuntimeError: return
-        except ConnectionRefusedError:
-            if not self._running: return
-            try: self.signals.status_changed.emit("error", "Connexion refusée — lance RL + SOS plugin")
-            except RuntimeError: return
-        except socket.timeout:
-            if not self._running: return
-            try: self.signals.status_changed.emit("error", "Timeout — SOS plugin actif ?")
-            except RuntimeError: return
-        except Exception as e:
-            if not self._running: return
-            try: self.signals.status_changed.emit("error", f"Erreur: {str(e)[:50]}")
-            except RuntimeError: return
-        finally:
-            if sock:
-                try: sock.close()
-                except: pass
-            self._tcp_sock = None; self.my_team = None
-            try: self.signals.status_changed.emit("error", "Déconnecté")
-            except RuntimeError: pass
-        if self._running:
-            time.sleep(3)
-            self.signals.log_event.emit("Reconnexion StatsAPI…")
-            self._loop()
+        while self._running:
+            port = self.config["statsapi_port"]
+            self.signals.status_changed.emit("", f"Connexion StatsAPI port {port}…")
+            sock = None
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)
+                sock.connect(("127.0.0.1", port))
+                sock.settimeout(None)
+                self._tcp_sock = sock
+                self.signals.status_changed.emit("connected", f"StatsAPI connecté · port {port}")
+                buf = b""
+                while self._running:
+                    try:    chunk = sock.recv(4096)
+                    except OSError: break
+                    if not chunk: break
+                    buf += chunk
+                    while buf:
+                        start = buf.find(b"{")
+                        if start == -1: buf = b""; break
+                        buf = buf[start:]
+                        depth = end = 0; in_str = escaped = False
+                        for i, bv in enumerate(buf):
+                            if escaped:          escaped = False; continue
+                            if bv == _B_BACKSLASH and in_str: escaped = True; continue
+                            if bv == _B_QUOTE:   in_str = not in_str; continue
+                            if in_str:           continue
+                            if bv == _B_OPEN:    depth += 1
+                            elif bv == _B_CLOSE:
+                                depth -= 1
+                                if depth == 0: end = i; break
+                        if end == 0 and depth != 0: break
+                        msg = buf[:end + 1]; buf = buf[end + 1:]
+                        try:
+                            _now = time.monotonic()
+                            _is_update = b'"UpdateState"' in msg[:60]
+                            if not _is_update or (_now - self._last_update_log_t) >= 1.0:
+                                _decoded = msg.decode(errors="replace")
+                                self.signals.log_event.emit(_decoded[:80])
+                                if _is_update:
+                                    self._last_update_log_t = _now
+                        except RuntimeError:
+                            return
+                        try:
+                            self._process_event(json.loads(msg))
+                        except Exception as e:
+                            try: self.signals.log_event.emit(f"ERR parse: {e}")
+                            except RuntimeError: return
+            except ConnectionRefusedError:
+                if not self._running: return
+                try: self.signals.status_changed.emit("error", "Connexion refusée — lance RL + SOS plugin")
+                except RuntimeError: return
+            except socket.timeout:
+                if not self._running: return
+                try: self.signals.status_changed.emit("error", "Timeout — SOS plugin actif ?")
+                except RuntimeError: return
+            except Exception as e:
+                if not self._running: return
+                try: self.signals.status_changed.emit("error", f"Erreur: {str(e)[:50]}")
+                except RuntimeError: return
+            finally:
+                if sock:
+                    try: sock.close()
+                    except: pass
+                self._tcp_sock = None; self.my_team = None
+                try: self.signals.status_changed.emit("error", "Déconnecté")
+                except RuntimeError: pass
+            if self._running:
+                time.sleep(3)
+                try: self.signals.log_event.emit("Reconnexion StatsAPI…")
+                except RuntimeError: return
 
     def _process_event(self, outer: dict):
         event = outer.get("Event", "")

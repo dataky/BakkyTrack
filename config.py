@@ -1,4 +1,4 @@
-"""config.py — Constantes, Config, chemins, contexte SSL."""
+"""config.py — Constantes, Config, chemins, contexte SSL, helpers partagés."""
 import os, sys, json, ssl as _ssl
 
 # ── Chemins ──────────────────────────────────────────────────────────────
@@ -16,6 +16,60 @@ PLAYLIST_NAMES = {
     "2v2": "Ranked Doubles 2v2",
     "3v3": "Ranked Standard 3v3",
 }
+
+# ── Rangs Rocket League (source unique — importé par mmr.py, sound.py) ────
+RANKS = [
+    "Unranked",
+    "Bronze I", "Bronze II", "Bronze III",
+    "Silver I", "Silver II", "Silver III",
+    "Gold I", "Gold II", "Gold III",
+    "Platinum I", "Platinum II", "Platinum III",
+    "Diamond I", "Diamond II", "Diamond III",
+    "Champion I", "Champion II", "Champion III",
+    "Grand Champion I", "Grand Champion II", "Grand Champion III",
+    "Supersonic Legend",
+]
+
+# ── Headers HTTP tracker.gg (source unique) ───────────────────────────────
+TRACKER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                   "AppleWebKit/537.36 (KHTML, like Gecko) "
+                   "Chrome/124.0.0.0 Safari/537.36"),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://rocketleague.tracker.network/",
+    "Origin": "https://rocketleague.tracker.network",
+    "Connection": "keep-alive",
+    "sec-fetch-site": "same-site",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-dest": "empty",
+}
+
+# ── Mapping plateforme ↔ slug tracker.gg ──────────────────────────────────
+PLATFORM_SLUGS = {
+    "epic": "epic", "steam": "steam",
+    "ps4": "psn", "xbox": "xbl", "switch": "switch",
+}
+
+# ── Préfixes PrimaryId → plateforme ───────────────────────────────────────
+_PLAT_PREFIX_MAP = {
+    "Steam|": "steam", "Epic|": "epic", "PS4|": "ps4",
+    "XboxOne|": "xbox", "Switch|": "switch",
+}
+
+
+def platform_from_id(primary_id: str) -> str:
+    """Déduit la plateforme depuis un PrimaryId (ex: 'Steam|123' → 'steam')."""
+    for prefix, plat in _PLAT_PREFIX_MAP.items():
+        if primary_id.startswith(prefix):
+            return plat
+    return "epic"
+
+
+def id_from_primary_id(primary_id: str) -> str:
+    """Extrait l'ID utilisateur depuis un PrimaryId (ex: 'Steam|123' → '123')."""
+    parts = primary_id.split("|")
+    return parts[1] if len(parts) >= 2 else primary_id
 
 # ── Contexte SSL — embarque certifi si disponible (fix PyInstaller) ───────
 try:
@@ -79,8 +133,11 @@ DEFAULT_CONFIG = {
 
 
 class Config:
+    _AUTOSAVE_DELAY = 2.0  # seconds
+
     def __init__(self):
         self._d = dict(DEFAULT_CONFIG)
+        self._save_timer = None
         self._load()
 
     def _load(self):
@@ -91,6 +148,10 @@ class Config:
             pass
 
     def save(self) -> bool:
+        # Cancel any pending auto-save since we're saving now
+        if self._save_timer is not None:
+            self._save_timer.cancel()
+            self._save_timer = None
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(self._d, f, indent=2, ensure_ascii=False)
@@ -99,6 +160,17 @@ class Config:
             print(f"[Config] save error: {e}")
             return False
 
+    def _schedule_save(self):
+        """Debounced auto-save: reschedule on every change, save after idle."""
+        if self._save_timer is not None:
+            self._save_timer.cancel()
+        import threading
+        self._save_timer = threading.Timer(self._AUTOSAVE_DELAY, self.save)
+        self._save_timer.daemon = True
+        self._save_timer.start()
+
     def __getitem__(self, k):    return self._d[k]
-    def __setitem__(self, k, v): self._d[k] = v
+    def __setitem__(self, k, v):
+        self._d[k] = v
+        self._schedule_save()
     def get(self, k, d=None):   return self._d.get(k, d)

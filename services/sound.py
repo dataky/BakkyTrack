@@ -1,6 +1,6 @@
 """services/sound.py — SoundService + cache in-game tracker.gg."""
 import os, time, threading, urllib.parse, urllib.request, urllib.error, json
-from config import BASE_DIR, SSL_CTX, SSL_CTX_NOVERIFY
+from config import BASE_DIR, SSL_CTX, SSL_CTX_NOVERIFY, RANKS, TRACKER_HEADERS
 from signals import AppSignals
 
 try:
@@ -18,19 +18,6 @@ _INGAME_CACHE_TTL = 300
 _ingame_fetch_lock = threading.Lock()
 _ingame_fetch_last = 0.0
 _INGAME_FETCH_GAP  = 1.2
-
-# ── Copie locale de la liste des rangs (évite l'import de services.mmr) ──
-_RANKS = [
-    "Unranked",
-    "Bronze I", "Bronze II", "Bronze III",
-    "Silver I", "Silver II", "Silver III",
-    "Gold I", "Gold II", "Gold III",
-    "Platinum I", "Platinum II", "Platinum III",
-    "Diamond I", "Diamond II", "Diamond III",
-    "Champion I", "Champion II", "Champion III",
-    "Grand Champion I", "Grand Champion II", "Grand Champion III",
-    "Supersonic Legend",
-]
 
 
 def _fetch_player_for_ingame(primary_id: str, display_name: str, cache: dict):
@@ -54,24 +41,11 @@ def _fetch_player_for_ingame(primary_id: str, display_name: str, cache: dict):
         _ingame_fetch_last = time.time()
     url = (f"https://api.tracker.gg/api/v2/rocket-league/standard/profile"
            f"/{slug}/{target}")
-    _HEADERS = {
-        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/124.0.0.0 Safari/537.36"),
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://rocketleague.tracker.network/",
-        "Origin": "https://rocketleague.tracker.network",
-        "Connection": "keep-alive",
-        "sec-fetch-site": "same-site",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-dest": "empty",
-    }
     _MAX_ATTEMPTS = 3
     _RETRY_WAIT   = 2
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
-            req = urllib.request.Request(url, headers=_HEADERS)
+            req = urllib.request.Request(url, headers=TRACKER_HEADERS)
             ctx = SSL_CTX if SSL_CTX is not None else SSL_CTX_NOVERIFY
             try:
                 with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
@@ -91,7 +65,7 @@ def _fetch_player_for_ingame(primary_id: str, display_name: str, cache: dict):
                 tier_name = s.get("tier", {}).get("metadata", {}).get("name", "Unranked")
                 mmr_val   = s.get("rating", {}).get("value", 0)
                 try:
-                    tier_id = _RANKS.index(tier_name)
+                    tier_id = RANKS.index(tier_name)
                 except ValueError:
                     tier_id = 0
                 playlists[pid_val] = {

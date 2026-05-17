@@ -4,14 +4,8 @@ from PyQt6.QtCore    import Qt, QPointF, QRectF, QTimer
 from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QLabel, QApplication
 from PyQt6.QtGui     import QPainter, QColor, QBrush, QPen, QLinearGradient, QFont
 from style import C_MUTE, C_BLUE, C_ORG, C_TEXT
-
-# ── Import de get_gamepad_state ──────────────────────────────────────────
-import os as _os
-_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
-if _ROOT not in sys.path:
-    sys.path.insert(0, _ROOT)
 from gamepad_state import get_gamepad_state
-# ────────────────────────────────────────────────────────────────────────
+from utils import enforce_topmost
 
 
 class _CtrlCanvas(QWidget):
@@ -149,15 +143,7 @@ class ControllerOverlay(QMainWindow):
         self.move(screen.right()-self.width()-20, screen.bottom()-self.height()-60)
 
     def _enforce_topmost(self):
-        if sys.platform != "win32" or not self.isVisible(): return
-        try:
-            import ctypes
-            hwnd = int(self.winId())
-            ctypes.windll.user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0003)
-            GWL_EXSTYLE = -20
-            ex = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex | 0x00080000 | 0x08000000 | 0x00000008)
-        except Exception: pass
+        enforce_topmost(self)
 
     def _poll(self):
         state = get_gamepad_state(0); self._canvas.set_state(state)
