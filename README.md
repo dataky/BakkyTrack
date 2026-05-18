@@ -1,214 +1,76 @@
-# 🚀 BakkyTrack
+# 📊 BakkyTrack - Ultimate Rocket League Companion Suite
 
-**Companion Rocket League avec overlay in-game, suivi MMR, automation et sons personnalisés.**  
-StatsAPI + WebSocket.
-
----
-
-## ✨ Fonctionnalités
-
-### Onglets principaux
-
-| Onglet | Description |
-|--------|-------------|
-| 📊 **Stats** | Suivi W/L, MMR et série de victoires/défaites en temps réel |
-| 👥 **Match** | Liste des joueurs du match en cours — clic pour ouvrir leur profil tracker.network |
-| 🖥 **Overlay** | Overlay in-game multi-styles, affichage MMR configurable (raccourci clavier ou bouton manette) |
-| ⚡ **Auto** | Skip replay automatique, auto-queue, retour en freeplay — touches configurables |
-| 🔊 **Sons** | Sons personnalisés sur les événements (but marqué/encaissé, crossbar, démo, save épique…) |
-| ⚙ **Options** | Plateforme, pseudo, ports, thème d'arrière-plan, mode streamer |
-
-### Overlays in-game
-
-**Overlay principal (hold-to-show)** — affiché en maintenant une touche clavier ou un bouton manette, avec 12 styles visuels :
-
-`Compact` · `Bannière` · `Bannière Classic` · `Pill` · `Neon` · `Sidebar` · `Gauge` · `Ticker` · `Glassmorphism` · `Scoreboard` · `HUD` · `Vivid`
-
-**Overlay Tab MMR** — affiche le MMR des joueurs du match pendant la partie (peak optionnel, playlists 1v1 / 2v2 / 3v3 ou meilleure).
-
-**Overlay résultat** — s'affiche automatiquement à la fin de chaque partie avec un thème SVG : `auto` · `victory` · `defeat` · `neon` · `dark_minimal` · `rl_classic`.
-
-**Overlay joueurs** — fenêtre flottante indépendante listant tous les joueurs du match avec leur MMR.
-
-**Overlay manette** — représentation visuelle en temps réel des inputs (deux modes : avec fond / transparent). Compatible Xbox (XInput) et PlayStation (DualShock / DualSense via SDL).
-
-### Mode Streamer
-
-Barre dédiée activable depuis les options — permet de couper le son système pendant un stream, de masquer les infos sensibles et de gérer les overlays sans quitter le jeu.
-
-### Serveur OBS (HTTP)
-
-BakkyTrack expose un serveur HTTP local sur le **port 49124** pour les overlays de stream :
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /stats` | Snapshot JSON des stats actuelles |
-| `GET /events` | Flux SSE temps réel (Server-Sent Events) |
-| `GET /<nom>.html` | Sert tout fichier HTML depuis le dossier `overlays/` |
+**BakkyTrack** est une suite d'outils et d'automatisation ultra-complète conçue en Python (PyQt6) pour Rocket League sous Windows. Conçu à la fois pour les compétiteurs acharnés et les streamers, il apporte des fonctionnalités avancées dignes de BakkesMod sans compromettre les performances de votre PC.
 
 ---
 
-## 📦 Prérequis
+## ✨ Fonctionnalités Majeures
 
-- **Python 3.10+**
-- **Windows** (l'overlay manette et les automations utilisent des API Win32/XInput)
+### 🎮 1. L'Overlay de Scoreboard en Jeu (Touche TAB)
+* **MMR en direct** : Affiche directement le MMR actuel de chaque joueur à côté de son nom sur le tableau des scores natif du jeu (lorsque vous maintenez la touche `TAB`).
+* **Suivi du Peak** : Affiche également le record de MMR atteint par chaque joueur (ex : `peak[1520]`) pour évaluer instantanément le niveau réel de vos adversaires.
+* **Placement Intelligent & Dynamique** : Le positionnement des textes s'adapte automatiquement à votre résolution d'écran (1080p, 1440p, 4K, 21:9) et se cale précisément sur les lignes Bleu et Orange de l'interface Rocket League.
+* **Icônes de Rangs et de Playlists** : Affiche de magnifiques badges de rang et de playlist pour identifier d'un coup d'œil le statut de chacun.
 
----
+### 🕵️ 2. Détection Anti-Smurf & Overlay Lobby
+* **Alerte Smurfs** : Notre algorithme analyse le profil des joueurs en temps réel. Si un joueur a moins de **150 victoires** totales à son actif tout en ayant atteint le rang **Champion 1** (ou supérieur), l'application affiche un symbole d'avertissement **`⚠️`** à côté de son nom.
+* **Overlay Joueurs (Touche F7)** : Un overlay flottant en verre dépoli liste tous les joueurs actuellement présents dans votre match, séparés par équipe.
+* **Lien de Profil Rapide** : Cliquez sur le nom d'un joueur dans la liste pour ouvrir instantanément sa fiche de statistiques complète sur `tracker.network` dans votre navigateur par défaut.
 
-> `pyautogui`, `pygame`, `vgamepad`, `websocket-client` et `certifi` sont **optionnels** —  
-> l'application démarre et désactive gracieusement les fonctionnalités manquantes.
+### 🖥️ 3. Overlays Flottants de Bureau & Personnalisables
+* **Thèmes Multiples** : Choisissez votre style visuel en double-cliquant sur l'overlay :
+  - **Scoreboard** : Design bi-ton Bleu vs Orange typé Rocket League avec barre centrale.
+  - **Glassmorphism** : Verre dépoli moderne avec reflets 3D et barre de winrate dynamique.
+  - **HUD** : Style tactique militaire (effet CRT avec lignes de balayage CRT vertes).
+  - **Vivid** : Blocs de couleurs modernes et ultra-saturés.
+  - **Compact** : Une ligne défilante sobre et fluide.
+* **Overlay Manette** : Affichez les pressions de touches de votre manette en temps réel (Xbox / PlayStation) avec styles transparent ou avec fond. Parfait pour les streams ou l'entraînement.
+* **Overlay Vitesse Balle** : Affiche en temps réel la vitesse exacte de la balle en km/h à l'écran lors de vos entraînements ou matchs.
+* **Sauvegarde de Position** : Tous les overlays se souviennent précisément de leur position sur l'écran au redémarrage de l'application !
 
----
+### 🔊 4. Soundpad Événementiel & Mode Streamer
+L'application analyse le trafic de données du jeu pour déclencher des sons personnalisés (au format `.wav`/`.mp3`) lors des temps forts du match :
+- Buts marqués par vous / Buts encaissés
+- Arrêts simples / Arrêts épiques
+- Démolitions subies / Démolitions infligées
+- Tirs sur la barre transversale (*Crossbar*)
+- **Mode Streamer intelligent** : Baisse ou coupe automatiquement les sons système ou musicaux pour éviter les droits d'auteur sur vos streams en cas de but.
 
-## 🗂 Structure du projet
+### ⚡ 5. Automatisations & Macros
+* **Auto-GG** : Tape instantanément et valide votre message personnalisé (ex: `gg`) à la fin exacte de la partie.
+* **Auto-Queue** : Relance automatiquement une recherche de partie pour minimiser le temps d'attente.
+* **Auto-Skip Replays** : Presse automatiquement la touche pour passer les ralentis de buts dès qu'ils commencent.
+* **Auto-Freeplay** : Vous envoie automatiquement en entraînement libre à la fin d'un match.
 
-```
-BakkyTrack/
-├── main.py                # entry point (30 lignes)
-├── config.py              # Config, DEFAULT_CONFIG, constantes, chemins, SSL
-├── style.py               # couleurs, APP_STYLE, helpers card/lbl/btn/hsep
-├── signals.py             # AppSignals
-├── services/
-│   ├── __init__.py
-│   ├── match.py           # MatchService
-│   ├── mmr.py             # MMRService
-│   └── sound.py           # SoundService (+ cache _ingame_stats, helpers tracker.gg)
-├── overlay_widgets.py     # déjà propre, on ajuste juste les imports
-├── ui/
-│   ├── __init__.py
-│   ├── main_window.py     # MainApp
-│   ├── tabs.py            # les 6 onglets (TrackerTab, PlayersTab, OverlayTab, AutomationTab, SoundTab, SettingsTab)
-│   ├── dialogs.py         # KeyCaptureDialog, KeyCaptureWidget, OverlayBindDialog, BindWorker
-│   ├── ingame_overlay.py  # InGameMMROverlay
-│   ├── players_overlay.py # PlayersOverlayWindow
-│   ├── controller_overlay.py # ControllerOverlay + _CtrlCanvas
-│   └── streamer_bar.py    # StreamerModeBar
-├── utils.py               # _key_to_vk, _VK_MAP, _key_display, _QT_KEY_MAP, get_rank_pixmap, get_playlist_pixmap, SVG_BACKGROUNDS, SvgBackground, ResultOverlay, _github_auto_update
-└── gamepad_state.py
-```
+### 🌐 6. Serveur API local HTTP & SSE (Web Source)
+BakkyTrack intègre un micro-serveur HTTP sur le port **8000** qui tourne en arrière-plan :
+- **Flux SSE (`/events`)** : Envoie des mises à jour de stats en temps réel (Server-Sent Events) pour alimenter des pages web tierces ou des sources de navigateur OBS.
+- **REST API (`/stats`)** : Renvoie un payload JSON complet de vos données de session.
 
----
-
-## ⚙ Configuration
-
-`config.json` est créé automatiquement au premier lancement. Principaux réglages :
-
-```json
-{
-  "platform":                    "epic",
-  "username":                    "TonPseudo",
-  "statsapi_port":               49123,
-  "overlay_mode":                "compact",
-  "mmr_display_mode":            "both",
-  "overlay_hotkey_type":         "key",
-  "overlay_hotkey_key":          "key:tab",
-  "overlay_hotkey_controller_btn": 0,
-  "tab_rank_mode":               "2v2",
-  "tab_show_peak":               true,
-  "controller_overlay_enabled":  false,
-  "controller_overlay_mode":     "with_bg",
-  "result_overlay_enabled":      true,
-  "result_overlay_theme":        "auto",
-  "auto_skip_replay":            false,
-  "auto_queue":                  false,
-  "auto_freeplay":               false,
-  "streamer_mode":               false,
-  "sound_goal_scored":           false
-}
-```
-
-| Clé | Valeurs | Description |
-|-----|---------|-------------|
-| `platform` | `epic` `steam` `ps4` `xbox` `switch` | Plateforme de jeu |
-| `overlay_mode` | `compact` `banner` `banner_classic` `pill` `neon` `sidebar` `gauge` `ticker` `glassmorphism` `scoreboard` `hud` `vivid` | Style de l'overlay in-game |
-| `mmr_display_mode` | `both` `mmr` `rank` | Contenu affiché dans l'overlay |
-| `overlay_hotkey_type` | `key` `controller` | Type de raccourci pour l'overlay |
-| `tab_rank_mode` | `1v1` `2v2` `3v3` `best` | Playlist affichée dans l'overlay Tab |
-| `controller_overlay_mode` | `with_bg` `transparent` | Style de l'overlay manette |
-| `result_overlay_theme` | `auto` `victory` `defeat` `neon` `dark_minimal` `rl_classic` | Thème SVG de fin de partie |
+### 📈 7. Historique Local SQLite & Graphiques
+* Enregistre chaque match dans une base de données locale sécurisée (`SQLite`).
+* Génère un graphique interactif de progression de MMR en direct pour voir vos pics et vos chutes de session.
 
 ---
 
-## 🎮 Raccourcis overlay
+## 🚀 Installation & Démarrage
 
-La touche de l'overlay peut être une touche clavier **ou** un bouton manette (Xbox / PlayStation), capturée directement depuis l'interface via un dialog de bind.
-
-Par défaut : **Tab** (maintien) pour l'overlay principal.
-
----
-
-## 📺 Overlays OBS
-
-1. Dans OBS, ajouter une source **Navigateur**
-2. URL : `http://localhost:49124/overlay.html`
-3. Tout fichier HTML déposé dans `overlays/` est automatiquement accessible
-
-Les overlays reçoivent les mises à jour via **SSE** (`/events`) — pas de polling nécessaire.
-
----
-
-## 🎮 Support manette
-
-BakkyTrack lit les inputs manette via deux backends complémentaires :
-
-- **XInput** (Windows) — manettes Xbox et tout périphérique en émulation XInput
-- **SDL via pygame** — DualShock 4, DualSense, et autres manettes non-XInput
-
-Le backend XInput est essayé en premier ; SDL prend le relais automatiquement si aucune manette XInput n'est détectée.
-
-> **Note SDL** — pygame est initialisé en mode headless (`SDL_VIDEODRIVER=dummy`) pour éviter tout conflit avec le système vidéo quand il tourne en arrière-plan.
-
----
-
-## 🔍 Détection du compte en jeu
-
-BakkyTrack détecte automatiquement le joueur principal à partir du flux StatsAPI, sans configuration manuelle obligatoire.
-
-### Comportement par plateforme
-
-| Plateforme | Identifiant utilisé |
-|------------|---------------------|
-| Epic Games | Pseudo du compte (ex : `MonPseudo#1234`) |
-| Steam | **Steam64 ID** (ex : `76561198012345678`) extrait automatiquement du `PrimaryId` |
-| PS4 / Xbox / Switch | Pseudo du compte |
-
-> Pour **Steam**, le champ `username` dans les options doit contenir le **Steam64 ID** (et non le pseudo Steam), afin que la recherche MMR sur tracker.gg fonctionne correctement.
-
-### Mécanisme de détection
-
-1. **Par plateforme + identifiant** — le `PrimaryId` reçu de StatsAPI est filtré selon le préfixe de la plateforme configurée (`Epic|`, `Steam|`, etc.)
-2. **Par pseudo** — si le `PrimaryId` ne suffit pas, le nom du joueur est comparé au pseudo configuré
-3. **Par caméra (fallback)** — si les deux méthodes échouent, la cible de la caméra in-game (`Target`) est utilisée pour identifier le joueur local
-
----
-
-## 🔌 Dépendances
-
-| Package | Usage | Requis |
-|---------|-------|--------|
-| `PyQt6` | Interface graphique + overlays | ✅ Oui |
-| `websocket-client` | Connexion BakkesMod WebSocket | Recommandé |
-| `pyautogui` | Automation clavier (auto-skip, queue, freeplay…) | Optionnel |
-| `pygame` | Sons personnalisés + manettes SDL | Optionnel |
-| `vgamepad` | Émulation de manette virtuelle | Optionnel |
-| `certifi` | Certificats SSL (fix PyInstaller) | Optionnel |
-
----
-
-## 🏗 Build exécutable (PyInstaller)
-
+### 1. Prérequis
+Vous devez disposer de **Python 3.11+** et installer les dépendances nécessaires dans votre terminal :
 ```bash
-pyinstaller --onefile --windowed --clean --name BakkyTrack ^
-  --hidden-import PyQt6.QtSvg ^
-  main.py
+pip install PyQt6 pygame pyautogui requests obsws-python pyyaml
 ```
 
-L'exécutable détecte automatiquement son répertoire pour charger `config.json`, les thèmes, les overlays et les icônes de rang.
-
-> Un seul exemplaire de BakkyTrack peut tourner à la fois — un second lancement affiche un avertissement et quitte proprement.
+### 2. Lancement
+```bash
+python main.py
+```
 
 ---
 
-## 📄 Licence
+## ⚙️ Configuration Rapide
 
-MIT — libre d'utilisation et de modification.
+1. **Pseudo** : Dans l'onglet `Options`, renseignez votre plateforme (Epic, Steam...) et votre pseudo exact.
+2. **Lancer le jeu** : Démarrez Rocket League. BakkyTrack détectera automatiquement le jeu et commencera le suivi.
+3. **Webhook Discord** : Dans l'onglet `Options`, cochez "Envoyer le résultat sur Discord" et collez votre lien de Webhook Discord pour recevoir des récapitulatifs automatiques de vos matchs.
+4. **Changement de Scène OBS** : Configurez votre OBS WebSocket (Host, Port, Mot de passe) pour que le logiciel change de scène entre vos phases en jeu (`In-Game`) et dans le lobby (`Lobby`).
