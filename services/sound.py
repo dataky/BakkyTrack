@@ -57,7 +57,12 @@ def _fetch_player_for_ingame(primary_id: str, display_name: str, cache: dict):
             if not isinstance(data.get("data"), dict):
                 raise ValueError("No profile data")
             playlists = {}
+            total_wins = 0
             for seg in data["data"].get("segments", []):
+                if seg.get("type") == "overview":
+                    wins_val = seg.get("stats", {}).get("wins", {}).get("value")
+                    if wins_val is not None:
+                        total_wins = int(wins_val)
                 if seg.get("type") != "playlist":
                     continue
                 pid_val   = seg.get("attributes", {}).get("playlistId")
@@ -83,7 +88,13 @@ def _fetch_player_for_ingame(primary_id: str, display_name: str, cache: dict):
                     else:
                         playlists[pid_val] = {"mmr": 0, "tier_name": "Unranked",
                                               "tier_id": 0, "peak_mmr": int(peak_val)}
-            cache[primary_id] = {"status": "ok", "playlists": playlists, "timestamp": time.time()}
+            
+            is_smurf = False
+            max_tier = max([p.get("tier_id", 0) for p in playlists.values()] + [0])
+            if total_wins > 0 and total_wins < 150 and max_tier >= 16: # 16 is Champion I
+                is_smurf = True
+                
+            cache[primary_id] = {"status": "ok", "playlists": playlists, "wins": total_wins, "is_smurf": is_smurf, "timestamp": time.time()}
             return
         except urllib.error.HTTPError as e:
             if e.code == 429 and attempt < _MAX_ATTEMPTS:

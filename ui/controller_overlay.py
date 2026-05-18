@@ -146,7 +146,19 @@ class ControllerOverlay(QMainWindow):
         enforce_topmost(self)
 
     def _poll(self):
-        state = get_gamepad_state(0); self._canvas.set_state(state)
+        try:
+            state = get_gamepad_state(0)
+            self._canvas.set_state(state)
+        except Exception:
+            pass
+
+    def closeEvent(self, e):
+        try:
+            self._poll_timer.stop()
+            self._top_timer.stop()
+        except Exception:
+            pass
+        super().closeEvent(e)
 
     def set_mode(self, mode):
         self._canvas.set_mode(mode); self.setFixedSize(self._canvas.width(), self._canvas.height())

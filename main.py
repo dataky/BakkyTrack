@@ -2,6 +2,13 @@
 """main.py — Entry point de BakkyTrack."""
 import sys
 import os
+import asyncio
+
+if sys.platform == 'win32':
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
 
 # ── Garantit que la racine du projet est dans sys.path ──────────────────
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

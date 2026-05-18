@@ -129,6 +129,18 @@ DEFAULT_CONFIG = {
     "controller_overlay_mode":       "with_bg",
     "streamer_mode":                 False,
     "streamer_mute_audio":           True,
+    "auto_gg":                       False,
+    "auto_gg_key":                   "key:t",
+    "auto_gg_text":                  "gg",
+    "auto_gg_delay":                 4.0,
+    "obs_ws_enabled":                False,
+    "obs_ws_host":                   "localhost",
+    "obs_ws_port":                   4455,
+    "obs_ws_password":               "",
+    "obs_scene_ingame":              "In-Game",
+    "obs_scene_outgame":             "Lobby",
+    "webhook_enabled":               False,
+    "webhook_url":                   "",
 }
 
 

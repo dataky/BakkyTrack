@@ -105,7 +105,11 @@ class PlayersOverlayWindow(QMainWindow):
                 platform   = self._platform_from_id(primary_id)
                 raw_id     = self._id_from_primary_id(primary_id) or name
                 user_id    = raw_id if platform == "steam" else name
-                pb = QPushButton(name)
+                
+                is_smurf = p.get("is_smurf", False)
+                smurf_icon = " ⚠️" if is_smurf else ""
+                
+                pb = QPushButton(name + smurf_icon)
                 pb.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
                 pb.setStyleSheet(f"QPushButton{{background:transparent;color:{team_color};border:none;text-align:left;font-size:12px;font-weight:700;padding:2px 6px;letter-spacing:0.3px;}}QPushButton:hover{{color:{C_TEXT};background:{C_BG3};border-radius:3px;}}")
                 pb.clicked.connect(lambda _, uid=user_id, pl=platform: self._open_profile(uid, pl))

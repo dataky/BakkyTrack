@@ -359,9 +359,6 @@ class MatchService:
                 self.signals.log_event.emit(
                     f"MatchEnded ignoré — my_team={my} winner={winner}")
             self.my_team        = None
-            self.team_scores    = {}
-            self._last_scores   = {}
-            self._goal_counts   = {0: 0, 1: 0}
             self._match_started = False
             self.signals.game_phase_changed.emit("lobby")
 
@@ -386,9 +383,6 @@ class MatchService:
                         "MatchDestroyed sans MatchEnded — équipe inconnue, résultat ignoré")
             self.my_team              = None
             self._last_known_my_team  = None
-            self.team_scores          = {}
-            self._last_scores         = {}
-            self._goal_counts         = {0: 0, 1: 0}
             self._prev_tgt_stats      = {}
             self._match_result_saved  = False
             self._match_started       = False

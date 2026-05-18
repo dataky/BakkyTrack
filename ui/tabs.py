@@ -593,6 +593,11 @@ class OverlayTab(QWidget):
         self._ctrl_active = self.app.config.get("controller_overlay_enabled", False)
         self._update_ctrl_btn_style()
         self._set_ctrl_mode(self.app.config.get("controller_overlay_mode", "with_bg"), save=False)
+        
+        if self.app.config.get("overlay_active", False):
+            self._toggle(save=False)
+        if self.app.config.get("ball_overlay_active", False):
+            self._toggle_ball_overlay(save=False)
 
     def _toggle_controller(self):
         from ui.controller_overlay import ControllerOverlay
@@ -631,8 +636,11 @@ class OverlayTab(QWidget):
             self.app.config.save()
             self._hk_display.setText(_overlay_hotkey_display(self.app.config))
 
-    def _toggle(self):
+    def _toggle(self, *args, save=True):
         self._active = not self._active
+        if save:
+            self.app.config["overlay_active"] = self._active
+            self.app.config.save()
         if self._active:
             self.app.overlay_win.show()
             self._toggle_btn.setText("■  DÉSACTIVER L'OVERLAY")
@@ -653,12 +661,17 @@ class OverlayTab(QWidget):
             active = m == mode
             b.setStyleSheet(f"QPushButton{{background:{C_BLUE if active else C_BG3};color:{C_TEXT if active else C_MUTE};border:none;border-radius:4px;padding:5px 12px;font-size:10px;font-weight:700;}}{'' if active else 'QPushButton:hover{color:' + C_TEXT + ';}'}")
 
-    def _toggle_ball_overlay(self):
+    def _toggle_ball_overlay(self, *args, save=True):
         from ui.ball_speed_overlay import BallSpeedOverlay
         self._ball_overlay_active = not self._ball_overlay_active
+        if save:
+            self.app.config["ball_overlay_active"] = self._ball_overlay_active
+            self.app.config.save()
         if self._ball_overlay_active:
             if self._ball_overlay_win is None:
                 self._ball_overlay_win = BallSpeedOverlay(self.app.signals, self.app.config)
+                pos = self.app.config.get("pos_ball_overlay")
+                if pos: self._ball_overlay_win.move(*pos)
             self._ball_overlay_win.show()
             self._ball_ovl_btn.setText("⚽  DÉSACTIVER L'OVERLAY VITESSE BALLE")
             self._ball_ovl_btn.setStyleSheet(
@@ -759,6 +772,23 @@ class AutomationTab(QWidget):
         fpl.addLayout(_key_row("Touche freeplay :", "freeplay_key", "key:f"))
         fpl.addLayout(_delay_row("Délai après fin de match :", "freeplay_delay", 55))
         root.addWidget(fp_card)
+
+        agg_card = card()
+        aggl = QVBoxLayout(agg_card); aggl.setContentsMargins(16,14,16,16); aggl.setSpacing(10)
+        aggl.addWidget(lbl("AUTO-GG", C_MUTE, 9))
+        self._agg_cb = QCheckBox("Dire GG automatiquement à la fin du match")
+        self._agg_cb.setChecked(bool(self.app.config.get("auto_gg", False)))
+        self._agg_cb.toggled.connect(lambda v: self.app.config.__setitem__("auto_gg", v))
+        aggl.addWidget(self._agg_cb)
+        aggl.addLayout(_key_row("Touche chat :", "auto_gg_key", "key:t"))
+        aggl.addLayout(_delay_row("Délai après fin de match :", "auto_gg_delay", 4))
+        
+        row_txt = QHBoxLayout(); row_txt.addWidget(lbl("Texte :", C_TEXT, 10)); row_txt.addStretch()
+        txt_field = QLineEdit(str(self.app.config.get("auto_gg_text", "gg")))
+        txt_field.setFixedWidth(70); txt_field.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        txt_field.textChanged.connect(lambda v: self.app.config.__setitem__("auto_gg_text", v))
+        row_txt.addWidget(txt_field); aggl.addLayout(row_txt)
+        root.addWidget(agg_card)
 
         po_card = card()
         pol = QVBoxLayout(po_card); pol.setContentsMargins(16,14,16,16); pol.setSpacing(10)
@@ -902,6 +932,44 @@ class SettingsTab(QWidget):
         self._result_theme.setFixedWidth(130)
         r_th.addStretch(); r_th.addWidget(self._result_theme); ol.addLayout(r_th)
         root.addWidget(ocard)
+
+        # Webhook
+        wh_card = card()
+        whl = QVBoxLayout(wh_card); whl.setContentsMargins(16,14,16,16); whl.setSpacing(10)
+        whl.addWidget(lbl("WEBHOOK DISCORD (POST-MATCH)", C_MUTE, 9))
+        self._wh_cb = QCheckBox("Envoyer le résultat sur Discord à la fin du match")
+        self._wh_cb.setChecked(bool(self.app.config.get("webhook_enabled", False)))
+        self._wh_cb.toggled.connect(lambda v: self.app.config.__setitem__("webhook_enabled", v))
+        whl.addWidget(self._wh_cb)
+        
+        row_wh = QHBoxLayout()
+        row_wh.addWidget(lbl("URL :", C_TEXT, 10))
+        wh_edit = QLineEdit(str(self.app.config.get("webhook_url", "")))
+        wh_edit.textChanged.connect(lambda v: self.app.config.__setitem__("webhook_url", v))
+        row_wh.addWidget(wh_edit)
+        whl.addLayout(row_wh)
+        root.addWidget(wh_card)
+
+        # OBS WebSocket
+        obs_card = card()
+        obsl = QVBoxLayout(obs_card); obsl.setContentsMargins(16,14,16,16); obsl.setSpacing(10)
+        obsl.addWidget(lbl("OBS WEBSOCKET (SCÈNES AUTO)", C_MUTE, 9))
+        self._obs_cb = QCheckBox("Changer de scène OBS automatiquement")
+        self._obs_cb.setChecked(bool(self.app.config.get("obs_ws_enabled", False)))
+        self._obs_cb.toggled.connect(lambda v: self.app.config.__setitem__("obs_ws_enabled", v))
+        obsl.addWidget(self._obs_cb)
+        
+        obs_grid = QVBoxLayout()
+        for label, key in [("Host", "obs_ws_host"), ("Port", "obs_ws_port"), ("Password", "obs_ws_password"), 
+                           ("Scène En-Jeu", "obs_scene_ingame"), ("Scène Lobby", "obs_scene_outgame")]:
+            row = QHBoxLayout()
+            row.addWidget(lbl(label + " :", C_TEXT, 10))
+            edit = QLineEdit(str(self.app.config.get(key, "")))
+            edit.textChanged.connect(lambda v, k=key: self.app.config.__setitem__(k, v))
+            row.addWidget(edit)
+            obs_grid.addLayout(row)
+        obsl.addLayout(obs_grid)
+        root.addWidget(obs_card)
 
         api_card = card(bg="#091409")
         al = QVBoxLayout(api_card); al.setContentsMargins(16,14,16,16); al.setSpacing(8)
