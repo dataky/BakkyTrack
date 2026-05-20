@@ -19,8 +19,65 @@ from PyQt6.QtGui import QPixmap, QIcon
 from PyQt6.QtCore import Qt as _Qt
 from config import BASE_DIR, DEFAULT_ICON_B64
 from style import APP_STYLE, C_BG, C_MUTE
-from utils import _github_auto_update
 from ui.main_window import MainApp
+
+
+def _create_splash():
+    """Crée un splash screen moderne avec dégradé."""
+    from PyQt6.QtCore import Qt as _QtCore
+    from PyQt6.QtGui import QPainter, QLinearGradient, QColor, QFont as _QFont, QPen
+    
+    size = (480, 160)
+    splash_px = QPixmap(*size)
+    splash_px.fill(_QtCore.GlobalColor.transparent)
+    
+    p = QPainter(splash_px)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    
+    # Fond dégradé
+    g = QLinearGradient(0, 0, size[0], size[1])
+    g.setColorAt(0.0, QColor("#0E111A"))
+    g.setColorAt(0.5, QColor("#080A12"))
+    g.setColorAt(1.0, QColor("#0E111A"))
+    p.setBrush(g)
+    p.setPen(_QtCore.PenStyle.NoPen)
+    p.drawRoundedRect(0, 0, size[0], size[1], 12, 12)
+    
+    # Bordure subtile
+    pen = QPen(QColor(26, 140, 255, 60))
+    pen.setWidth(1)
+    p.setPen(pen)
+    p.setBrush(_QtCore.BrushStyle.NoBrush)
+    p.drawRoundedRect(1, 1, size[0]-2, size[1]-2, 12, 12)
+    
+    # Texte
+    font_big = _QFont("Segoe UI", 18, _QFont.Weight.Black)
+    p.setFont(font_big)
+    p.setPen(QColor("#E8ECF4"))
+    p.drawText(24, 40, 300, 50, _QtCore.AlignmentFlag.AlignLeft | _QtCore.AlignmentFlag.AlignVCenter, "BakkyTrack")
+    
+    font_sub = _QFont("Segoe UI", 9, _QFont.Weight.Medium)
+    p.setFont(font_sub)
+    p.setPen(QColor("#5A6A82"))
+    p.drawText(24, 80, 300, 30, _QtCore.AlignmentFlag.AlignLeft | _QtCore.AlignmentFlag.AlignVCenter, "Rocket League Stats Tracker")
+    
+    # Indicateur de chargement
+    font_small = _QFont("Segoe UI", 9, _QFont.Weight.Medium)
+    p.setFont(font_small)
+    p.setPen(QColor("#3AE08A"))
+    p.drawText(24, 130, 300, 20, _QtCore.AlignmentFlag.AlignLeft | _QtCore.AlignmentFlag.AlignVCenter, "● Chargement…")
+    
+    # Ligne bleue en bas
+    g2 = QLinearGradient(0, 0, size[0], 0)
+    g2.setColorAt(0.0, QColor("#1A8CFF"))
+    g2.setColorAt(0.5, QColor("#00CFFF"))
+    g2.setColorAt(1.0, QColor("#1A8CFF"))
+    p.setBrush(g2)
+    p.setPen(_QtCore.PenStyle.NoPen)
+    p.drawRoundedRect(24, size[1]-12, size[0]-48, 3, 2, 2)
+    
+    p.end()
+    return QSplashScreen(splash_px, _Qt.WindowType.WindowStaysOnTopHint)
 
 
 def main():
@@ -31,9 +88,6 @@ def main():
             import ctypes
             ctypes.windll.user32.MessageBoxW(0, "BakkyTrack est déjà en cours d'exécution.", "BakkyTrack", 0x30)
             sys.exit(0)
-
-    # Auto-update en arrière-plan (non bloquant)
-    _github_auto_update(blocking=False)
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
@@ -53,17 +107,27 @@ def main():
         if not px.isNull(): icon = QIcon(px)
     if icon: app.setWindowIcon(icon)
 
-    from PyQt6.QtGui import QColor as _QColor
-    splash_px = QPixmap(400, 120); splash_px.fill(_QColor(C_BG))
-    splash = QSplashScreen(splash_px, _Qt.WindowType.WindowStaysOnTopHint)
-    splash.showMessage("  Chargement de BakkyTrack…",
-                       _Qt.AlignmentFlag.AlignBottom | _Qt.AlignmentFlag.AlignLeft,
-                       _QColor(C_MUTE))
-    splash.show(); app.processEvents()
+    splash = _create_splash()
+    splash.show()
+    app.processEvents()
 
     win = MainApp()
     if icon: win.setWindowIcon(icon)
-    splash.finish(win); win.show(); win.raise_(); win.activateWindow()
+    
+    # Animation de fondu
+    win.setWindowOpacity(0.0)
+    splash.finish(win)
+    win.show()
+    win.raise_()
+    win.activateWindow()
+    
+    from PyQt6.QtCore import QPropertyAnimation
+    anim = QPropertyAnimation(win, b"windowOpacity")
+    anim.setDuration(300)
+    anim.setStartValue(0.0)
+    anim.setEndValue(1.0)
+    anim.start()
+    
     sys.exit(app.exec())
 
 

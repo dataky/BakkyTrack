@@ -1,6 +1,7 @@
 """ui/main_window.py — MainApp (QMainWindow)."""
 import os, sys, time, json, threading, base64
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from concurrent.futures import ThreadPoolExecutor
 
 try: import pyautogui; PYAUTOGUI_AVAILABLE = True
 except ImportError: PYAUTOGUI_AVAILABLE = False
@@ -19,11 +20,10 @@ from services.match import MatchService
 from services.mmr import MMRService
 from services.sound import SoundService
 from utils import (
-    _key_display, _key_to_vk, SvgBackground, ResultOverlay, _github_auto_update,
+    _key_display, _key_to_vk, SvgBackground, ResultOverlay,
     enforce_topmost,
 )
-from ui.tabs import TrackerTab, PlayersTab, OverlayTab, AutomationTab, SoundTab, SettingsTab
-from ui.graph_tab import GraphTab
+from ui.tabs import StatsTab, OverlayAutoTab, SettingsTab
 from services.db import DatabaseService
 from services.obs_ws import OBSWebSocketService
 from services.webhook import DiscordWebhookService
@@ -40,8 +40,8 @@ class MainApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("BakkyTrack")
-        self.setFixedWidth(468)
-        self.setMinimumHeight(660)
+        self.setFixedWidth(580)
+        self.setMinimumHeight(700)
         self.config  = Config()
         self.signals = AppSignals()
         self.match   = MatchService(self.config, self.signals)
@@ -50,11 +50,13 @@ class MainApp(QMainWindow):
         self.db      = DatabaseService()
         self.obs     = OBSWebSocketService(self.config, self.signals)
         self.webhook = DiscordWebhookService(self.config, self.signals)
+        # Thread pool centralisé pour toutes les tâches réseau/IO
+        self._thread_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="bakkytrack")
         self.overlay_win         = OverlayWindow()
         if self.config.get("pos_main_overlay"):
             self.overlay_win.move(*self.config.get("pos_main_overlay"))
             
-        self.players_overlay_win = PlayersOverlayWindow()
+        self.players_overlay_win = PlayersOverlayWindow(self.sound, self.db)
         self.result_overlay      = ResultOverlay()
         self.ingame_mmr_overlay  = InGameMMROverlay()
         self.ingame_mmr_overlay.set_show_peak(self.config.get("tab_show_peak", True))
@@ -73,36 +75,35 @@ class MainApp(QMainWindow):
         self._bg_widget = SvgBackground(bg_theme)
         tabs = QTabWidget()
         tabs.setDocumentMode(True)
-        self.tracker_tab  = TrackerTab(self)
-        self.graph_tab    = GraphTab(self)
-        self.players_tab  = PlayersTab(self)
-        self.overlay_tab  = OverlayTab(self)
-        self.auto_tab     = AutomationTab(self)
-        self.sound_tab    = SoundTab(self)
+        self.stats_tab  = StatsTab(self)
+        self.overlay_auto_tab  = OverlayAutoTab(self)
         self.settings_tab = SettingsTab(self)
-        scroll = QScrollArea(); scroll.setWidget(self.tracker_tab)
-        scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setStyleSheet("background:transparent;border:none;")
-        sound_scroll = QScrollArea(); sound_scroll.setWidget(self.sound_tab)
-        sound_scroll.setWidgetResizable(True); sound_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        sound_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        sound_scroll.setStyleSheet("background:transparent;border:none;")
-        settings_scroll = QScrollArea(); settings_scroll.setWidget(self.settings_tab)
-        settings_scroll.setWidgetResizable(True); settings_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        
+        # Chaque onglet dans un QScrollArea pour permettre le scroll
+        stats_scroll = QScrollArea()
+        stats_scroll.setWidget(self.stats_tab)
+        stats_scroll.setWidgetResizable(True)
+        stats_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        stats_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        stats_scroll.setStyleSheet("background:transparent;border:none;")
+        
+        overlay_scroll = QScrollArea()
+        overlay_scroll.setWidget(self.overlay_auto_tab)
+        overlay_scroll.setWidgetResizable(True)
+        overlay_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        overlay_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        overlay_scroll.setStyleSheet("background:transparent;border:none;")
+        
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidget(self.settings_tab)
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setFrameShape(QFrame.Shape.NoFrame)
         settings_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         settings_scroll.setStyleSheet("background:transparent;border:none;")
-        auto_scroll = QScrollArea(); auto_scroll.setWidget(self.auto_tab)
-        auto_scroll.setWidgetResizable(True); auto_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        auto_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        auto_scroll.setStyleSheet("background:transparent;border:none;")
-        tabs.addTab(scroll,              "📊  Stats")
-        tabs.addTab(self.graph_tab,      "📈  Graph")
-        tabs.addTab(self.players_tab,    "👥  Match")
-        tabs.addTab(self.overlay_tab,    "🖥  Overlay")
-        tabs.addTab(auto_scroll,         "⚡  Auto")
-        tabs.addTab(sound_scroll,        "🔊  Sons")
-        tabs.addTab(settings_scroll,     "⚙  Options")
+        
+        tabs.addTab(stats_scroll,         "📊  Stats")
+        tabs.addTab(overlay_scroll,       "🖥  Overlay & Auto")
+        tabs.addTab(settings_scroll,      "⚙  Paramètres")
         self._bg_widget.add_widget(tabs)
         self.setCentralWidget(self._bg_widget)
         self.signals.player_detected.connect(
@@ -127,7 +128,13 @@ class MainApp(QMainWindow):
         self.match.start()
         self._start_hotkey_listener()
         self.fetch_mmr_async(force=True)
-        self.config["streamer_mode"] = False
+        # Restaurer le mode streamer depuis la config sauvegardée (NE PAS forcer à False)
+        streamer_state = self.config.get("streamer_mode", False)
+        if streamer_state:
+            self._apply_streamer_mode(True)
+            self._streamer_active = True
+        else:
+            self._streamer_active = False
 
     @property
     def wins(self):               return self.match.wins
@@ -158,21 +165,31 @@ class MainApp(QMainWindow):
         
         self._pending_match_report = {
             "result": t,
-            "playlist": pl_name,
             "my_score": my_s,
-            "opp_score": opp_s
+            "opp_score": opp_s,
+            "playlist": pl_name,
+            "players": list(self.match.current_players)
         }
         
         QTimer.singleShot(10000, self.fetch_mmr_async)
-        if self.config.get("auto_queue"):
-            delay_q = int(float(self.config.get("queue_delay", 2.0)) * 1000)
-            QTimer.singleShot(delay_q, self._do_queue_action)
-        if self.config.get("auto_freeplay"):
-            delay_f = int(float(self.config.get("freeplay_delay", 3.0)) * 1000)
-            QTimer.singleShot(delay_f, self._do_freeplay_action)
+        # We schedule Auto-GG first, then ensure other automation macros run after it's done to prevent keyboard clashes!
         if self.config.get("auto_gg"):
             delay_g = int(float(self.config.get("auto_gg_delay", 4.0)) * 1000)
             QTimer.singleShot(delay_g, self._do_auto_gg)
+        else:
+            delay_g = -80
+
+        if self.config.get("auto_queue"):
+            delay_q = int(float(self.config.get("queue_delay", 2.0)) * 1000)
+            if self.config.get("auto_gg"):
+                delay_q = max(delay_q, delay_g + 80)
+            QTimer.singleShot(delay_q, self._do_queue_action)
+
+        if self.config.get("auto_freeplay"):
+            delay_f = int(float(self.config.get("freeplay_delay", 3.0)) * 1000)
+            if self.config.get("auto_gg"):
+                delay_f = max(delay_f, delay_g + 80)
+            QTimer.singleShot(delay_f, self._do_freeplay_action)
 
     def remove(self, t):      self.match.remove(t)
     def reset_session(self):  self.match.reset_session(self.mmr)
@@ -196,7 +213,7 @@ class MainApp(QMainWindow):
             self.match.detected_player_primary_id, force=force)
 
     def reconnect_statsapi(self):
-        port_str = self.tracker_tab.get_port()
+        port_str = self.stats_tab.get_port()
         try: port = int(port_str)
         except ValueError: port = self.config["statsapi_port"]
         self.match.restart(port)
@@ -217,7 +234,7 @@ class MainApp(QMainWindow):
         def _do():
             if delay > 0: time.sleep(delay)
             self._press_key(key_str)
-        threading.Thread(target=_do, daemon=True).start()
+        self._thread_pool.submit(_do)
 
     def _play_sound(self, file_str):
         self.sound.play_sound(file_str)
@@ -241,30 +258,33 @@ class MainApp(QMainWindow):
     def _do_queue_action(self):
         key = self.config.get("queue_key", "key:return")
         self.signals.log_event.emit(f"[Auto] Rejouer → {_key_display(key)}")
-        threading.Thread(target=lambda: self._press_key(key), daemon=True).start()
+        self._thread_pool.submit(self._press_key, key)
 
     def _do_freeplay_action(self):
         key = self.config.get("freeplay_key", "key:f")
         self.signals.log_event.emit(f"[Auto] Freeplay → {_key_display(key)}")
-        threading.Thread(target=lambda: self._press_key(key), daemon=True).start()
+        self._thread_pool.submit(self._press_key, key)
 
     def _do_auto_gg(self):
         key = self.config.get("auto_gg_key", "key:t")
         text = self.config.get("auto_gg_text", "gg")
         self.signals.log_event.emit(f"[Auto] Auto-GG → '{text}'")
+        
         def _macro():
             self._press_key(key)
-            time.sleep(0.05)
+            time.sleep(0.04)  # Minimum delay to allow Rocket League chat box to focus (40ms)
             try:
                 import pyautogui
+                # Instantaneous pyautogui text writing
                 pyautogui.write(text)
-                time.sleep(0.05)
+                time.sleep(0.01)  # Minimal buffer before pressing Enter
                 pyautogui.press("enter")
             except Exception as e:
                 self.signals.log_event.emit(f"[Auto] Erreur macro: {e}")
-        threading.Thread(target=_macro, daemon=True).start()
+        self._thread_pool.submit(_macro)
 
     def _on_game_phase_changed(self, phase: str):
+
         if not self.config.get("streamer_mode", False): return
         if phase == "lobby": self._apply_streamer_bar(True)
         elif phase == "ingame": self._apply_streamer_bar(False)
@@ -287,18 +307,24 @@ class MainApp(QMainWindow):
         total = self.wins + self.losses
         wr    = round(self.wins / total * 100) if total > 0 else 0
         d     = self.mmr.all_mmr.get(self.mmr.selected_playlist, {})
+        tier_id = d.get("tier_id", 0)
+        div_id = d.get("div_id", 0)
+        mmr = d.get("mmr", 0)
+        from utils import estimate_division_progress
+        prog = estimate_division_progress(tier_id, div_id, mmr)
         return {
             "wins": self.wins, "losses": self.losses, "total": total, "winrate": wr,
             "streak_val": self.streak, "streak_type": self.streak_type or "",
-            "mmr": d.get("mmr"), "mmr_change": d.get("mmr_change", 0),
-            "rank": d.get("rank", ""), "tier_id": d.get("tier_id", 0),
-            "div_id": d.get("div_id", 0),
+            "mmr": mmr, "mmr_change": d.get("mmr_change", 0),
+            "rank": d.get("rank", ""), "tier_id": tier_id,
+            "div_id": div_id,
+            "div_prog": prog
         }
 
     def _push_overlay(self):
         stats = self._build_stats_dict()
         self.overlay_win.update_stats(stats)
-        self.overlay_tab.refresh_preview(stats)
+        self.overlay_auto_tab.refresh_preview(stats)
         if stats != self._last_sse_stats:
             self._last_sse_stats = stats; self._push_sse("stats", stats)
 
@@ -312,8 +338,8 @@ class MainApp(QMainWindow):
         except ImportError: return
         prev_pressed  = False; cached_key = None; cached_vk = None; _cfg_refresh = 0
         while self.match._running:
-            time.sleep(0.04); _cfg_refresh += 1
-            if _cfg_refresh >= 50:
+            time.sleep(0.1); _cfg_refresh += 1
+            if _cfg_refresh >= 20:
                 _cfg_refresh = 0
                 new_key = self.config.get("players_overlay_key", "key:f7")
                 if new_key != cached_key: cached_key = new_key; cached_vk = _key_to_vk(new_key)
@@ -351,8 +377,22 @@ class MainApp(QMainWindow):
             
             self.db.add_match(rep["playlist"], rep["result"], rep["my_score"], rep["opp_score"], mmr_start, mmr_end, mmr_chg)
             self.webhook.send_match_result(rep["result"], rep["my_score"], rep["opp_score"], mmr_chg)
+            
+            # Record encounters in player_encounters table
+            my_team = self.match.my_team if self.match.my_team is not None else getattr(self.match, "_last_known_my_team", None)
+            my_name = self.match.detected_player_name
+            players_list = rep.get("players", [])
+            if my_team is not None and my_name:
+                from config import platform_from_id
+                for p in players_list:
+                    pname = p.get("Name")
+                    if pname and pname != my_name:
+                        p_team = p.get("TeamNum")
+                        team_role = "teammate" if p_team == my_team else "opponent"
+                        plat = platform_from_id(p.get("PrimaryId", ""))
+                        self.db.record_encounter(pname, plat, rep["result"], team_role)
+            
             self._pending_match_report = None
-            self.signals.match_result.emit("update_graph")
             
         self._refresh_own_ingame_cache()
 
@@ -393,8 +433,8 @@ class MainApp(QMainWindow):
         if sys.platform != "win32": return
         was_pressed = False; cfg_refresh = 0
         while self.match._running:
-            time.sleep(0.04); cfg_refresh += 1
-            if cfg_refresh >= 50: cfg_refresh = 0
+            time.sleep(0.1); cfg_refresh += 1
+            if cfg_refresh >= 20: cfg_refresh = 0
             pressed = self._is_overlay_hotkey_pressed()
             if pressed and not was_pressed:
                 QTimer.singleShot(0, self._on_overlay_hold_start)
@@ -416,7 +456,8 @@ class MainApp(QMainWindow):
             self.match.current_players, self.sound.ingame_stats_cache,
             self.mmr.selected_playlist,
             rank_mode=self.config.get("tab_rank_mode", "2v2"),
-            game_state=self.match.current_game_state)
+            game_state=self.match.current_game_state,
+            smurf_enabled=self.config.get("smurf_detection_enabled", True))
         self.ingame_mmr_overlay._rebuild()
 
     def _on_overlay_hold_end(self):
@@ -430,8 +471,8 @@ class MainApp(QMainWindow):
         try:
             self.config["pos_main_overlay"] = (self.overlay_win.x(), self.overlay_win.y())
             self.config["pos_ctrl_overlay"] = (self.controller_overlay.x(), self.controller_overlay.y())
-            if getattr(self.overlay_tab, "_ball_overlay_win", None):
-                self.config["pos_ball_overlay"] = (self.overlay_tab._ball_overlay_win.x(), self.overlay_tab._ball_overlay_win.y())
+            if getattr(self.overlay_auto_tab, "_ball_overlay_win", None):
+                self.config["pos_ball_overlay"] = (self.overlay_auto_tab._ball_overlay_win.x(), self.overlay_auto_tab._ball_overlay_win.y())
             self.config.save()
         except Exception: pass
         try: self._overlay_timer.stop()
@@ -505,7 +546,7 @@ class MainApp(QMainWindow):
             def log_message(self, *a): pass
 
         def run():
-            try: ThreadingHTTPServer(("0.0.0.0", OVERLAY_PORT), Handler).serve_forever()
+            try: ThreadingHTTPServer(("127.0.0.1", OVERLAY_PORT), Handler).serve_forever()
             except Exception as e: print(f"[HTTP] {e}")
         threading.Thread(target=run, daemon=True).start()
 

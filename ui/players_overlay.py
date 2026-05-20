@@ -14,8 +14,10 @@ from config import platform_from_id, id_from_primary_id, PLATFORM_SLUGS
 
 
 class PlayersOverlayWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, sound=None, db=None):
         super().__init__()
+        self._sound = sound
+        self._db = db
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
@@ -55,6 +57,8 @@ class PlayersOverlayWindow(QMainWindow):
         self._topmost_timer = QTimer(self)
         self._topmost_timer.timeout.connect(self._enforce_topmost)
         self._topmost_timer.start(2000)
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(lambda: self.update_players(self._players))
         self._refresh_empty()
 
     def _mouse_press(self, e):
@@ -67,6 +71,11 @@ class PlayersOverlayWindow(QMainWindow):
 
     def showEvent(self, e):
         super().showEvent(e); self._enforce_topmost()
+        self._refresh_timer.start(1500)
+        
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        self._refresh_timer.stop()
 
     def _enforce_topmost(self):
         enforce_topmost(self)
@@ -106,10 +115,27 @@ class PlayersOverlayWindow(QMainWindow):
                 raw_id     = self._id_from_primary_id(primary_id) or name
                 user_id    = raw_id if platform == "steam" else name
                 
-                is_smurf = p.get("is_smurf", False)
-                smurf_icon = " ⚠️" if is_smurf else ""
+                is_smurf = False
+                if self._sound:
+                    entry = self._sound.ingame_stats_cache.get(primary_id)
+                    if entry and entry.get("status") == "ok":
+                        is_smurf = entry.get("is_smurf", False)
+                smurf_icon = " ⚠️ Smurf?" if is_smurf else ""
                 
-                pb = QPushButton(name + smurf_icon)
+                record_str = ""
+                if self._db:
+                    rec = self._db.get_encounter_record(name)
+                    vs_total = rec["vs_wins"] + rec["vs_losses"]
+                    with_total = rec["with_wins"] + rec["with_losses"]
+                    if vs_total > 0 or with_total > 0:
+                        parts = []
+                        if vs_total > 0:
+                            parts.append(f"vs:{rec['vs_wins']}V-{rec['vs_losses']}D")
+                        if with_total > 0:
+                            parts.append(f"with:{rec['with_wins']}V-{rec['with_losses']}D")
+                        record_str = f" [{', '.join(parts)}]"
+                
+                pb = QPushButton(name + smurf_icon + record_str)
                 pb.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
                 pb.setStyleSheet(f"QPushButton{{background:transparent;color:{team_color};border:none;text-align:left;font-size:12px;font-weight:700;padding:2px 6px;letter-spacing:0.3px;}}QPushButton:hover{{color:{C_TEXT};background:{C_BG3};border-radius:3px;}}")
                 pb.clicked.connect(lambda _, uid=user_id, pl=platform: self._open_profile(uid, pl))

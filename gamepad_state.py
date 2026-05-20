@@ -46,16 +46,25 @@ except (ImportError, OSError):
 
 _dsc_instance: "_DSC | None" = None
 _dsc_active   = False
+import time
+_dsc_last_scan_time = 0.0
+_DSC_SCAN_INTERVAL = 3.0  # limit device enumeration to once every 3 seconds if not active
 
 def _dsc_init() -> bool:
-    """Tente d'activer la DualSense via dualsense-controller. Idempotent."""
-    global _dsc_instance, _dsc_active
+    """Tente d'activer la DualSense via dualsense-controller. Idempotent et bridé dans le temps."""
+    global _dsc_instance, _dsc_active, _dsc_last_scan_time
     if not _HAS_DSC:
         return False
     if _dsc_active and _dsc_instance is not None and _dsc_instance.is_active:
         return True
+    
+    # Throttle scan rate to prevent high CPU / micro-stutters from continuous USB/HID device enumeration
+    now = time.time()
+    if now - _dsc_last_scan_time < _DSC_SCAN_INTERVAL:
+        return False
+    _dsc_last_scan_time = now
+
     try:
-        # Vérifie qu'au moins un DualSense est détecté avant d'instancier
         devs = _DSC.enumerate_devices()
         if not devs:
             return False

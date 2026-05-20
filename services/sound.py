@@ -1,5 +1,6 @@
 """services/sound.py — SoundService + cache in-game tracker.gg."""
 import os, time, threading, urllib.parse, urllib.request, urllib.error, json
+from concurrent.futures import ThreadPoolExecutor
 from config import BASE_DIR, SSL_CTX, SSL_CTX_NOVERIFY, RANKS, TRACKER_HEADERS
 from signals import AppSignals
 
@@ -14,13 +15,15 @@ _PLAT_TO_SLUG = {
     "PS4": "psn", "XboxOne": "xbl", "Switch": "switch",
 }
 
-_INGAME_CACHE_TTL = 300
+_INGAME_CACHE_TTL = 120  # cache rafraîchi toutes les 2 min au lieu de 5
 _ingame_fetch_lock = threading.Lock()
 _ingame_fetch_last = 0.0
-_INGAME_FETCH_GAP  = 1.2
+_INGAME_FETCH_GAP  = 0.0  # plus de gap forcé — parallélisation via ThreadPool
+_INGAME_POOL_SIZE  = 6
+_ingame_executor   = ThreadPoolExecutor(max_workers=_INGAME_POOL_SIZE)
 
 
-def _fetch_player_for_ingame(primary_id: str, display_name: str, cache: dict):
+def _fetch_player_for_ingame(primary_id: str, display_name: str, cache: dict, smurf_enabled: bool = True):
     global _ingame_fetch_last
     parts = primary_id.split("|")
     if len(parts) < 2:
@@ -33,36 +36,35 @@ def _fetch_player_for_ingame(primary_id: str, display_name: str, cache: dict):
     if not target:
         cache[primary_id] = {"status": "error", "http_code": 0, "playlists": {}, "timestamp": time.time()}
         return
-    with _ingame_fetch_lock:
-        now  = time.time()
-        wait = _INGAME_FETCH_GAP - (now - _ingame_fetch_last)
-        if wait > 0:
-            time.sleep(wait)
-        _ingame_fetch_last = time.time()
+    # Pas de lock global — les appels sont parallélisés par le ThreadPoolExecutor
     url = (f"https://api.tracker.gg/api/v2/rocket-league/standard/profile"
            f"/{slug}/{target}")
-    _MAX_ATTEMPTS = 3
-    _RETRY_WAIT   = 2
+    _MAX_ATTEMPTS = 2
+    _RETRY_WAIT   = 1
     for attempt in range(1, _MAX_ATTEMPTS + 1):
         try:
             req = urllib.request.Request(url, headers=TRACKER_HEADERS)
             ctx = SSL_CTX if SSL_CTX is not None else SSL_CTX_NOVERIFY
             try:
-                with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
+                with urllib.request.urlopen(req, timeout=8, context=ctx) as resp:
                     raw = resp.read().decode("utf-8")
             except Exception:
-                with urllib.request.urlopen(req, timeout=10) as resp:
+                with urllib.request.urlopen(req, timeout=8) as resp:
                     raw = resp.read().decode("utf-8")
             data = json.loads(raw)
             if not isinstance(data.get("data"), dict):
                 raise ValueError("No profile data")
             playlists = {}
             total_wins = 0
+            trn_score = 0
             for seg in data["data"].get("segments", []):
                 if seg.get("type") == "overview":
-                    wins_val = seg.get("stats", {}).get("wins", {}).get("value")
-                    if wins_val is not None:
-                        total_wins = int(wins_val)
+                     wins_val = seg.get("stats", {}).get("wins", {}).get("value")
+                     if wins_val is not None:
+                         total_wins = int(wins_val)
+                     score_val = seg.get("stats", {}).get("score", {}).get("value")
+                     if score_val is not None:
+                         trn_score = float(score_val)
                 if seg.get("type") != "playlist":
                     continue
                 pid_val   = seg.get("attributes", {}).get("playlistId")
@@ -91,8 +93,13 @@ def _fetch_player_for_ingame(primary_id: str, display_name: str, cache: dict):
             
             is_smurf = False
             max_tier = max([p.get("tier_id", 0) for p in playlists.values()] + [0])
-            if total_wins > 0 and total_wins < 150 and max_tier >= 16: # 16 is Champion I
-                is_smurf = True
+            if smurf_enabled:
+                if max_tier >= 16:  # Champion or above
+                    if (0 < trn_score < 150000) or (0 < total_wins < 250):
+                        is_smurf = True
+                elif 10 <= max_tier <= 15:  # Diamond & Platinum
+                    if (0 < trn_score < 80000) or (0 < total_wins < 120):
+                        is_smurf = True
                 
             cache[primary_id] = {"status": "ok", "playlists": playlists, "wins": total_wins, "is_smurf": is_smurf, "timestamp": time.time()}
             return
@@ -155,25 +162,38 @@ class SoundService:
     def fetch_players_for_ingame(self, players: list, my_pid: str,
                                  mmr_to_ingame_entry_fn):
         now = time.time()
+        futures = []
         for p in players:
             pid  = p.get("PrimaryId", "")
             name = p.get("Name", "")
             if not pid:
                 continue
-            if my_pid and pid == my_pid:
-                self._ingame_stats_cache[pid] = mmr_to_ingame_entry_fn()
-                continue
+            # Vérification du cache
             entry = self._ingame_stats_cache.get(pid)
-            if entry and entry.get("status") == "ok":
-                age = now - entry.get("timestamp", 0)
-                if age < _INGAME_CACHE_TTL:
-                    continue
+            if pid == my_pid:
+                if not entry:
+                    self._ingame_stats_cache[pid] = mmr_to_ingame_entry_fn()
+                    entry = self._ingame_stats_cache.get(pid)
+                if entry and entry.get("status") == "ok":
+                    age = now - entry.get("timestamp", 0)
+                    if age < _INGAME_CACHE_TTL:
+                        continue
+            else:
+                if entry and entry.get("status") == "ok":
+                    age = now - entry.get("timestamp", 0)
+                    if age < _INGAME_CACHE_TTL:
+                        continue
+            
             self._ingame_stats_cache[pid] = {"status": "loading", "playlists": {}, "timestamp": now}
-            threading.Thread(
-                target=_fetch_player_for_ingame,
-                args=(pid, name, self._ingame_stats_cache),
-                daemon=True
-            ).start()
+            # Lancement parallélisé via ThreadPoolExecutor (pas de gap de 1.2s)
+            futures.append(
+                _ingame_executor.submit(
+                    _fetch_player_for_ingame,
+                    pid, name, self._ingame_stats_cache,
+                    self.config.get("smurf_detection_enabled", True)
+                )
+            )
+        # On ne bloque pas — les résultats arrivent de manière asynchrone
 
     def refresh_own_ingame_cache(self, my_pid: str, entry: dict):
         if my_pid:

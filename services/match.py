@@ -240,6 +240,8 @@ class MatchService:
                             self.detected_player_name = p.get("Name", "")
                         self.detected_player_primary_id = raw_pid
                         self.signals.player_detected.emit(self.detected_player_name, self.my_team)
+                        # Emission du nouveau signal avec PrimaryId
+                        self.signals.player_detected_with_id.emit(self.detected_player_name, self.my_team, self.detected_player_primary_id)
                         break
                 if self.my_team is None and game.get("bHasTarget") and not game.get("bReplay"):
                     tgt          = game.get("Target", {})
@@ -270,6 +272,9 @@ class MatchService:
                                 self.detected_player_primary_id = matched_player.get("PrimaryId", "")
                             self.signals.player_detected.emit(
                                 matched_player.get("Name", tgt_name), tgt_team)
+                            # Emission du nouveau signal avec PrimaryId
+                            self.signals.player_detected_with_id.emit(
+                                self.detected_player_name, self.my_team, self.detected_player_primary_id)
 
         elif event == "GoalScored":
             pass

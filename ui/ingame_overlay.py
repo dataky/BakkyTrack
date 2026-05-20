@@ -60,12 +60,13 @@ class InGameMMROverlay(QMainWindow):
         enforce_topmost(self)
 
     def set_data(self, players: list, stats: dict, playlist_key: str,
-                 rank_mode: str = "", game_state: dict = None):
+                 rank_mode: str = "", game_state: dict = None, smurf_enabled: bool = True):
         self._players      = players or []
         self._stats        = stats or {}
         self._playlist_key = playlist_key
         if rank_mode: self._rank_mode = rank_mode
         if game_state is not None: self._game_state = game_state
+        self._smurf_enabled = smurf_enabled
 
     def set_show_peak(self, show: bool):
         self._show_peak = show
@@ -116,13 +117,17 @@ class InGameMMROverlay(QMainWindow):
                     html = f'<span style="{mmr_style}">[{mmr}]</span>'
                     if peak and self._show_peak:
                         html += f'&nbsp;<span style="{peak_style}">peak[{peak}]</span>'
-                    return html
-            return f'<span style="{mute_style}">[--]</span>'
-        if status == "loading": return f'<span style="{mute_style}">[…]</span>'
+                    is_smurf = entry.get("is_smurf", False) if getattr(self, "_smurf_enabled", True) else False
+                    if is_smurf:
+                        smurf_style = f"font-size:{peak_px}px;font-weight:700;color:#FF5555;font-family:{_font};text-shadow:0 1px 3px rgba(0,0,0,0.8);"
+                        html += f'<br><span style="{smurf_style}">⚠️ Smurf?</span>'
+                    return f'<div style="text-align:right;">{html}</div>'
+            return f'<div style="text-align:right;"><span style="{mute_style}">[--]</span></div>'
+        if status == "loading": return f'<div style="text-align:right;"><span style="{mute_style}">[…]</span></div>'
         if status == "error":
             http = entry.get("http_code", 0) if entry else 0
             sym  = "🔒" if http == 403 else "?"
-            return f'<span style="{mute_style}">[{sym}]</span>'
+            return f'<div style="text-align:right;"><span style="{mute_style}">[{sym}]</span></div>'
         return ""
 
     def _rebuild(self):

@@ -1,5 +1,5 @@
 """config.py — Constantes, Config, chemins, contexte SSL, helpers partagés."""
-import os, sys, json, ssl as _ssl
+import os, sys, json, ssl as _ssl, threading
 
 # ── Chemins ──────────────────────────────────────────────────────────────
 if getattr(sys, 'frozen', False):
@@ -7,7 +7,9 @@ if getattr(sys, 'frozen', False):
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-CONFIG_PATH  = os.path.join(BASE_DIR, "config.json")
+_CONFIG_DIR    = os.path.join(os.environ.get('LOCALAPPDATA', BASE_DIR), "BakkyTrack")
+CONFIG_PATH    = os.path.join(_CONFIG_DIR, "config.json")
+CONFIG_TEMPLATE = os.path.join(BASE_DIR, "config.json")
 OVERLAY_PORT = 49124
 REFRESH_MS   = 2000
 
@@ -141,11 +143,22 @@ DEFAULT_CONFIG = {
     "obs_scene_outgame":             "Lobby",
     "webhook_enabled":               False,
     "webhook_url":                   "",
+    "smurf_detection_enabled":       True,
+    "mmr_source":                    "rlapi",
+    "bot_refresh_token": "",
+    "bot_account_id": "",
+    "bot_account_name": "",
 }
 
 
 class Config:
+    """Gestion de la configuration avec sauvegarde garantie des comptes sensibles."""
+    
     _AUTOSAVE_DELAY = 2.0  # seconds
+    # Clés sensibles qui DOIVENT être sauvegardées immédiatement.
+    # ATTENTION: ne pas mettre de clés éditables via textChanged ici,
+    # sinon chaque frappe déclenche une écriture disque !
+    _IMMEDIATE_SAVE_KEYS = set()
 
     def __init__(self):
         self._d = dict(DEFAULT_CONFIG)
@@ -153,36 +166,86 @@ class Config:
         self._load()
 
     def _load(self):
+        """Charge la config depuis %LOCALAPPDATA%\\BakkyTrack\\config.json (ou fallback depuis Program Files)."""
         try:
             with open(CONFIG_PATH, encoding="utf-8") as f:
-                self._d.update(json.load(f))
-        except Exception:
+                loaded = json.load(f)
+                self._d.update(loaded)
+                print(f"[Config] ✓ Chargée depuis {CONFIG_PATH}")
+                if self._d.get("bot_account_name"):
+                    print(f"[Config] Compte bot chargé : {self._d['bot_account_name']}")
+                return
+        except FileNotFoundError:
             pass
+        except json.JSONDecodeError as e:
+            print(f"[Config] Erreur JSON : {e}")
+        except Exception as e:
+            print(f"[Config] Erreur lors du chargement : {e}")
 
-    def save(self) -> bool:
+        # Fallback : chargement depuis le template installé (Program Files)
+        try:
+            with open(CONFIG_TEMPLATE, encoding="utf-8") as f:
+                loaded = json.load(f)
+                self._d.update(loaded)
+                print(f"[Config] ✓ Chargée depuis le template {CONFIG_TEMPLATE}")
+                # Sauvegarde immédiate dans %LOCALAPPDATA% pour la prochaine fois
+                self.save()
+        except Exception:
+            print(f"[Config] Aucun fichier trouvé, utilisation des valeurs par défaut")
+
+    def save(self, force=False) -> bool:
+        """
+        Sauvegarde immédiate la config sur disque dans %LOCALAPPDATA%.
+        
+        Args:
+            force: Si True, ne pas attendre le délai auto-save
+        """
         # Cancel any pending auto-save since we're saving now
         if self._save_timer is not None:
             self._save_timer.cancel()
             self._save_timer = None
         try:
+            os.makedirs(_CONFIG_DIR, exist_ok=True)
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
                 json.dump(self._d, f, indent=2, ensure_ascii=False)
+            if self._d.get("bot_account_name"):
+                print(f"[Config] ✓ Sauvegardée : compte bot '{self._d['bot_account_name']}'")
+            else:
+                print(f"[Config] ✓ Sauvegardée")
             return True
         except Exception as e:
-            print(f"[Config] save error: {e}")
+            print(f"[Config] ✗ Erreur sauvegarde : {e}")
             return False
 
-    def _schedule_save(self):
-        """Debounced auto-save: reschedule on every change, save after idle."""
+    def _schedule_save(self, key=None):
+        """
+        Schedule auto-save avec délai.
+        Les clés sensibles (bot_*) sont sauvegardées immédiatement.
+        """
+        # Si c'est une clé sensible, sauvegarder IMMÉDIATEMENT
+        if key in self._IMMEDIATE_SAVE_KEYS:
+            self.save()
+            return
+        
+        # Sinon, utiliser le délai d'auto-save
         if self._save_timer is not None:
             self._save_timer.cancel()
-        import threading
         self._save_timer = threading.Timer(self._AUTOSAVE_DELAY, self.save)
         self._save_timer.daemon = True
         self._save_timer.start()
 
-    def __getitem__(self, k):    return self._d[k]
+    def __getitem__(self, k):
+        return self._d[k]
+    
     def __setitem__(self, k, v):
+        """Set avec détection des clés sensibles."""
         self._d[k] = v
-        self._schedule_save()
-    def get(self, k, d=None):   return self._d.get(k, d)
+        self._schedule_save(key=k)
+    
+    def get(self, k, d=None):
+        return self._d.get(k, d)
+    
+    def update(self, other_dict):
+        """Met à jour la config depuis un dictionnaire."""
+        self._d.update(other_dict)
+        self.save()  # Sauvegarde immédiate après update

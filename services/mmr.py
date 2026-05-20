@@ -1,18 +1,18 @@
-"""services/mmr.py — MMRService : tracker.gg HTTP."""
+"""services/mmr.py — MMRService : tracker.gg + fallback RLAPI (singleton RLAPI)."""
 import os, time, json, threading, urllib.parse, urllib.request, urllib.error
 from config import BASE_DIR, SSL_CTX, PLAYLIST_NAMES, RANKS, TRACKER_HEADERS, PLATFORM_SLUGS
 from signals import AppSignals
+from services.mmr_fetcher_rlapi import RLAPIMmrFetcher
 
 
 class MMRService:
-    _CACHE_PATH  = os.path.join(BASE_DIR, "mmr_cache.json")
+    _CACHE_DIR   = os.path.join(os.environ.get('LOCALAPPDATA', BASE_DIR), "BakkyTrack")
+    _CACHE_PATH  = os.path.join(_CACHE_DIR, "mmr_cache.json")
     _MAX_RETRIES = 3
     _RETRY_WAIT  = 4
 
     _RANKS = RANKS
-
     _PLAYLIST_IDS = {10: "1v1", 11: "2v2", 13: "3v3"}
-
     _PLATFORM_SLUG = PLATFORM_SLUGS
 
     def __init__(self, config, signals: AppSignals):
@@ -25,6 +25,14 @@ class MMRService:
             for k in PLAYLIST_NAMES
         }
         self._load_cache()
+        self.detected_primary_id = None
+        self._fetch_lock = threading.Lock()
+        # Connexion au signal de détection avec ID
+        self.signals.player_detected_with_id.connect(self._on_player_detected)
+
+    def _on_player_detected(self, name, team, primary_id):
+        self.detected_primary_id = primary_id
+        self.signals.log_event.emit(f"[MMR] ID détecté en jeu: {primary_id}")
 
     def _tier_id(self, rank_name: str) -> int:
         try: return self._RANKS.index(rank_name)
@@ -54,6 +62,7 @@ class MMRService:
 
     def _save_cache(self):
         try:
+            os.makedirs(self._CACHE_DIR, exist_ok=True)
             data = {
                 k: {"mmr": v["mmr"], "rank": v.get("rank", ""),
                     "tier_id": v.get("tier_id", 0), "div_id": v.get("div_id", 0),
@@ -70,24 +79,92 @@ class MMRService:
             d["mmr_start"] = d["mmr"]
             d["mmr_change"] = 0
 
-    _FETCH_COOLDOWN_S = 300
-    _last_fetch_time  = 0.0
+    _TRACKER_COOLDOWN_S = 300
+    _last_tracker_fetch_time = 0.0
 
     def fetch_async(self, player_name="", player_primary_id="", force=False):
-        now = time.time()
-        if not force:
-            elapsed = now - MMRService._last_fetch_time
-            remaining = self._FETCH_COOLDOWN_S - elapsed
-            if remaining > 0:
-                mins = int(remaining // 60)
-                secs = int(remaining % 60)
-                self.signals.log_event.emit(
-                    f"[MMR] Cooldown actif — prochain fetch dans {mins}m{secs:02d}s")
-                return
-        MMRService._last_fetch_time = now
-        threading.Thread(target=self._fetch, args=(player_name, player_primary_id), daemon=True).start()
+        # Éviter les appels concurrents
+        if not self._fetch_lock.acquire(blocking=False):
+            self.signals.log_event.emit("[MMR] Fetch déjà en cours, ignoré.")
+            return
+        try:
+            preferred = self.config.get("mmr_source", "rlapi")
 
-    def _fetch(self, player_name="", player_primary_id=""):
+            if preferred != "rlapi":
+                # Cooldown uniquement pour tracker.gg (évite les rate limits)
+                now = time.time()
+                if not force:
+                    elapsed = now - MMRService._last_tracker_fetch_time
+                    remaining = self._TRACKER_COOLDOWN_S - elapsed
+                    if remaining > 0:
+                        mins = int(remaining // 60)
+                        secs = int(remaining % 60)
+                        self.signals.log_event.emit(
+                            f"[MMR] Cooldown tracker.gg — prochain fetch dans {mins}m{secs:02d}s")
+                        return
+                MMRService._last_tracker_fetch_time = now
+
+            if preferred == "rlapi":
+                threading.Thread(target=self._fetch_with_rlapi,
+                                 args=(player_name, player_primary_id, force),
+                                 daemon=True).start()
+            else:
+                threading.Thread(target=self._fetch_tracker,
+                                 args=(player_name, player_primary_id),
+                                 daemon=True).start()
+        finally:
+            self._fetch_lock.release()
+
+    def _fetch_with_rlapi(self, player_name="", player_primary_id="", force=False):
+        effective_primary_id = self.detected_primary_id or player_primary_id
+        platform = self.config["platform"].lower()
+        username = self.config["username"] or player_name
+
+        epic_id = None
+        if effective_primary_id and effective_primary_id.startswith("Epic|"):
+            parts = effective_primary_id.split("|")
+            if len(parts) >= 2:
+                epic_id = parts[1]
+                self.signals.log_event.emit(f"[RLAPI] Utilisation de l'Epic ID détecté: {epic_id}")
+        elif effective_primary_id and effective_primary_id.startswith("Steam|"):
+            self.signals.log_event.emit("[RLAPI] PrimaryId Steam détecté, mais RLAPI préfère Epic — fallback tracker")
+            self._fetch_tracker(player_name, player_primary_id)
+            return
+
+        if not epic_id and not username:
+            self.signals.log_event.emit("[RLAPI] Pas d'identifiant utilisateur (pseudo ou ID).")
+            return
+
+        self.signals.log_event.emit("[RLAPI] Tentative de récupération MMR via RLAPI...")
+        fetcher = RLAPIMmrFetcher(self.config, self.signals)  # singleton
+        try:
+            if epic_id:
+                data = fetcher.fetch_sync(username, platform, user_id=epic_id)
+            else:
+                data = fetcher.fetch_sync(username, platform)
+        except Exception as e:
+            self.signals.log_event.emit(f"[RLAPI] Échec: {str(e)[:80]} → fallback vers tracker.gg")
+            self._fetch_tracker(player_name, player_primary_id)
+            return
+
+        for playlist_key, values in data.items():
+            if playlist_key in self.all_mmr:
+                d = self.all_mmr[playlist_key]
+                d["mmr"] = values["mmr"]
+                if d["mmr_start"] is None:
+                    d["mmr_start"] = values["mmr"]
+                d["mmr_change"] = d["mmr"] - (d["mmr_start"] or d["mmr"])
+                d["rank"] = values["rank"]
+                d["tier_id"] = values["tier_id"]
+                d["div_id"] = values["div_id"]
+                if values.get("peak_mmr"):
+                    d["peak_mmr"] = values["peak_mmr"]
+        self._save_cache()
+        self.signals.mmr_updated.emit()
+        self.signals.log_event.emit("✓ MMR & Ranks mis à jour (RLAPI officiel)")
+
+    def _fetch_tracker(self, player_name="", player_primary_id=""):
+        """Ancienne méthode via tracker.gg (inchangée)."""
         platform = self.config["platform"].lower()
         slug     = self._PLATFORM_SLUG.get(platform, "epic")
         if slug == "steam":

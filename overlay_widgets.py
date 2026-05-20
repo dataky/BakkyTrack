@@ -33,15 +33,37 @@ class _GlassCard(QWidget):
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setBrush(QBrush(QColor(10, 12, 16, 220)))
-        p.setPen(QPen(QColor(255, 255, 255, 25), 1))
-        p.drawRoundedRect(self.rect().adjusted(0, 2, 0, 0), 8, 8)
-        g = QLinearGradient(0, 0, self.width(), 0)
+        w, h = self.width(), self.height()
+        
+        # Fond sombre avec plus de profondeur
+        p.setBrush(QBrush(QColor(14, 16, 22, 230)))
+        p.setPen(QPen(QColor(255, 255, 255, 18), 1))
+        p.drawRoundedRect(self.rect().adjusted(0, 2, 0, 0), 10, 10)
+        
+        # Dégradé subtil en arrière-plan
+        bg_grad = QLinearGradient(0, 0, w, h)
+        bg_grad.setColorAt(0.0, QColor(20, 24, 36, 60))
+        bg_grad.setColorAt(0.5, QColor(10, 12, 18, 30))
+        bg_grad.setColorAt(1.0, QColor(20, 24, 36, 60))
+        p.setBrush(QBrush(bg_grad))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(self.rect().adjusted(2, 2, -2, -2), 10, 10)
+        
+        # Barre supérieure dégradée (bleu → orange → cyan)
+        g = QLinearGradient(0, 0, w, 0)
         g.setColorAt(0.0, QColor("#1A8CFF"))
-        g.setColorAt(1.0, QColor("#FF6B00"))
+        g.setColorAt(0.5, QColor("#FF6B00"))
+        g.setColorAt(1.0, QColor("#00CFFF"))
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(g))
-        p.drawRoundedRect(0, 0, self.width(), 2, 1, 1)
+        p.drawRoundedRect(0, 0, w, 2, 1, 1)
+        
+        # Reflet brillant en haut
+        shine = QLinearGradient(0, 2, 0, h * 0.25)
+        shine.setColorAt(0.0, QColor(255, 255, 255, 12))
+        shine.setColorAt(1.0, QColor(255, 255, 255, 0))
+        p.setBrush(QBrush(shine))
+        p.drawRoundedRect(QRectF(0, 2, w, h * 0.25), 10, 10)
 
 
 class _CompactCard(_GlassCard):
@@ -1751,6 +1773,68 @@ class _DragLayer(QWidget):
     def mouseDoubleClickEvent(self, e):
         self.dbl_clicked.emit()
 
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        win = self.window()
+        if not hasattr(win, "_stats") or not win._stats:
+            return
+        sv = win._stats.get("streak_val", 0)
+        st = win._stats.get("streak_type", "")
+        if sv >= 3:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            w, h = self.width(), self.height()
+            import math, time
+            glow = int(75 + 20 * math.sin(time.time() * 2.0))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            
+            if getattr(win, "mode", "") == "gauge":
+                # Perfect circular inner glow for circular Gauge overlay
+                cx = w // 2
+                cy = h // 2 - 4
+                r = 96
+                for i in range(16):
+                    step = i * 1.5
+                    pen_width = 3.0
+                    opacity = int((glow / 5.5) * (1.0 - (i / 16.0)) ** 1.0)
+                    if opacity <= 0:
+                        continue
+                    if st == "win":
+                        color = QColor(255, 75, 10, opacity)
+                    else:
+                        color = QColor(0, 180, 255, opacity)
+                    p.setPen(QPen(color, pen_width))
+                    curr_r = r - step
+                    if curr_r <= 0:
+                        break
+                    p.drawEllipse(QRectF(cx - curr_r, cy - curr_r, curr_r * 2, curr_r * 2))
+            else:
+                # Rounded rect inner glow for rectangular cards
+                card_x, card_y = 36, 36
+                card_w, card_h = w - 72, h - 72
+                for i in range(16):
+                    step = i * 1.5
+                    pen_width = 3.0
+                    opacity = int((glow / 5.5) * (1.0 - (i / 16.0)) ** 1.0)
+                    if opacity <= 0:
+                        continue
+                    if st == "win":
+                        color = QColor(255, 75, 10, opacity)
+                    else:
+                        color = QColor(0, 180, 255, opacity)
+                    p.setPen(QPen(color, pen_width))
+                    rx = card_x + step
+                    ry = card_y + step
+                    rw = card_w - 2 * step
+                    rh = card_h - 2 * step
+                    if rw <= 0 or rh <= 0:
+                        break
+                    p.drawRoundedRect(
+                        QRectF(rx, ry, rw, rh),
+                        max(1.0, 8.0 - step * 0.1), max(1.0, 8.0 - step * 0.1)
+                    )
+            p.end()
+
 
 def _load_overlay_plugins() -> dict:
     """Charge dynamiquement tous les plugins depuis le dossier overlays/.
@@ -1800,7 +1884,7 @@ class OverlayWindow(QMainWindow):
             self._stack.addWidget(p["widget"])
 
         outer = QVBoxLayout(cont)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(36, 36, 36, 36)
         outer.addWidget(self._stack)
 
         self._drag = _DragLayer(cont)
@@ -1817,6 +1901,60 @@ class OverlayWindow(QMainWindow):
         self._topmost_timer = QTimer(self)
         self._topmost_timer.timeout.connect(self._enforce_topmost)
         self._topmost_timer.start(2000)
+
+        # Smooth animation timer for Fire/Ice border
+        self._anim_timer = QTimer(self)
+        self._anim_timer.timeout.connect(self._on_anim_tick)
+        self._anim_timer.start(30)
+
+    def _on_anim_tick(self):
+        if self.isVisible() and self._stats and self._stats.get("streak_val", 0) >= 3:
+            if hasattr(self, "_drag"):
+                self._drag.update()
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if not self._stats:
+            return
+
+        # Draw division progress bar at the bottom of the card
+        prog = self._stats.get("div_prog")
+        if getattr(self, "mode", "") != "gauge" and prog and prog.get("pct") is not None:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            w, h = self.width(), self.height()
+            
+            card_x = 36
+            card_y = 36
+            card_w = w - 72
+            card_h = h - 72
+            
+            bar_x = card_x + 10
+            bar_y = card_y + card_h - 6
+            bar_w = card_w - 20
+            
+            # Progress bar background
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(255, 255, 255, 20))
+            p.drawRoundedRect(bar_x, bar_y, bar_w, 3, 1.5, 1.5)
+            
+            # Rank color
+            tier_id = self._stats.get("tier_id", 0)
+            if 1 <= tier_id <= 3: color = QColor("#A0522D")
+            elif 4 <= tier_id <= 6: color = QColor("#D3D3D3")
+            elif 7 <= tier_id <= 9: color = QColor("#FFD700")
+            elif 10 <= tier_id <= 12: color = QColor("#40E0D0")
+            elif 13 <= tier_id <= 15: color = QColor("#00BFFF")
+            elif 16 <= tier_id <= 18: color = QColor("#8A2BE2")
+            elif 19 <= tier_id <= 21: color = QColor("#FF4500")
+            else: color = QColor("#FFFFFF")
+            
+            pct = max(0, min(100, prog["pct"]))
+            active_w = int(bar_w * (pct / 100))
+            if active_w > 0:
+                p.setBrush(color)
+                p.drawRoundedRect(bar_x, bar_y, active_w, 3, 1.5, 1.5)
+            p.end()
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -1857,13 +1995,16 @@ class OverlayWindow(QMainWindow):
         p = self._plugins.get(self.mode) or next(iter(self._plugins.values()), None)
         if p:
             self._stack.setCurrentWidget(p["widget"])
-            self.setFixedSize(*p["size"])
+            w, h = p["size"]
+            self.setFixedSize(w + 72, h + 72)
 
     def update_stats(self, stats: dict):
         self._stats = stats
         p = self._plugins.get(self.mode)
         if p and hasattr(p["widget"], "update_stats"):
             p["widget"].update_stats(stats, self.mmr_mode)
+        if hasattr(self, "_drag"):
+            self._drag.update()
 
 
 

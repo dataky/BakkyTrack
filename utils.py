@@ -1,5 +1,7 @@
 """utils.py — Icônes, SVG, overlays globaux, auto-updater, VK keys, helpers partagés."""
 import os, sys, time, urllib.parse, urllib.request, urllib.error, json, hashlib, threading
+import re, webbrowser, ctypes
+from typing import Optional
 from config import BASE_DIR, SSL_CTX, SSL_CTX_NOVERIFY
 
 # ── VK key map ──────────────────────────────────────────────────────────
@@ -79,32 +81,37 @@ _QT_KEY_MAP = {
 }
 
 
-# ── Icônes de rang ───────────────────────────────────────────────────────
+# ── Icônes de rang (cache LRU — max 64 entrées) ─────────────────────────
+from functools import lru_cache
+
 _RANK_FOLDER = os.path.join(BASE_DIR, "all rank")
-_rank_pixmap_cache: dict = {}
 
 
 def get_rank_pixmap(tier_id: int, size: int = 40):
     from PyQt6.QtGui import QPixmap
     key = (tier_id, size)
-    if key in _rank_pixmap_cache:
-        return _rank_pixmap_cache[key]
+    # Cache LRU intégré via lru_cache sur une fonction interne
+    return _get_rank_pixmap_impl(key)
+
+
+@lru_cache(maxsize=64)
+def _get_rank_pixmap_impl(key):
+    from PyQt6.QtGui import QPixmap
+    from PyQt6.QtCore import Qt as _Qt
+    tier_id, size = key
     path = os.path.join(_RANK_FOLDER, f"{tier_id}.png")
     if os.path.exists(path):
         pm = QPixmap(path)
         if not pm.isNull():
             scaled = pm.scaled(size, size,
-                               Qt.AspectRatioMode.KeepAspectRatio,
-                               Qt.TransformationMode.SmoothTransformation)
-            _rank_pixmap_cache[key] = scaled
+                               _Qt.AspectRatioMode.KeepAspectRatio,
+                               _Qt.TransformationMode.SmoothTransformation)
             return scaled
-    _rank_pixmap_cache[key] = None
     return None
 
 
-# ── Icônes de playlist ───────────────────────────────────────────────────
+# ── Icônes de playlist (cache LRU — max 32 entrées) ─────────────────────
 _PLAYLIST_FOLDER = os.path.join(BASE_DIR, "Playlist")
-_playlist_pixmap_cache: dict = {}
 
 _PLAYLIST_FILE_INDEX = {
     "1v1": 0, "2v2": 1, "3v3": 2,
@@ -113,30 +120,32 @@ _PLAYLIST_FILE_INDEX = {
 _PLAYLIST_ID_TO_KEY = {10: "1v1", 11: "2v2", 13: "3v3"}
 
 
-def get_playlist_pixmap(playlist_key, size: int = 28):
+@lru_cache(maxsize=32)
+def _get_playlist_pixmap_impl(key):
     from PyQt6.QtGui import QPixmap
-    file_idx = _PLAYLIST_FILE_INDEX.get(playlist_key, 2)
-    key = (file_idx, size)
-    if key in _playlist_pixmap_cache:
-        return _playlist_pixmap_cache[key]
+    from PyQt6.QtCore import Qt as _Qt
+    file_idx, size = key
     path = os.path.join(_PLAYLIST_FOLDER, f"{file_idx}.png")
     if os.path.exists(path):
         pm = QPixmap(path)
         if not pm.isNull():
             scaled = pm.scaled(size, size,
-                               Qt.AspectRatioMode.KeepAspectRatio,
-                               Qt.TransformationMode.SmoothTransformation)
-            _playlist_pixmap_cache[key] = scaled
+                               _Qt.AspectRatioMode.KeepAspectRatio,
+                               _Qt.TransformationMode.SmoothTransformation)
             return scaled
-    _playlist_pixmap_cache[key] = None
     return None
+
+
+def get_playlist_pixmap(playlist_key, size: int = 28):
+    file_idx = _PLAYLIST_FILE_INDEX.get(playlist_key, 2)
+    return _get_playlist_pixmap_impl((file_idx, size))
 
 
 # ── SVG Backgrounds ──────────────────────────────────────────────────────
 from PyQt6.QtCore import QRectF, QByteArray
 from PyQt6.QtWidgets import QWidget, QVBoxLayout
 from PyQt6.QtGui import QPainter
-from PyQt6.QtSvg import QSvgRenderer
+from PyQt6.QtSvg import QSvgRenderer  # noqa: F401 — requis explicitement pour PyInstaller
 
 THEMES_DIR = os.path.join(BASE_DIR, "themes")
 _THEME_NAMES = ["rl_classic", "victory", "defeat", "neon", "dark_minimal"]
@@ -363,125 +372,129 @@ class ResultOverlay(QWidget):
         p.end()
 
 
-# ── Auto-updater GitHub ──────────────────────────────────────────────────
-_GITHUB_API  = "https://api.github.com/repos/dataky/BakkyTrack/contents/"
-_GITHUB_RAW  = "https://raw.githubusercontent.com/dataky/BakkyTrack/main/"
-_UPDATE_DIRS = {
-    "overlays":  os.path.join(BASE_DIR, "overlays"),
-    "all rank":  os.path.join(BASE_DIR, "all rank"),
-    "themes":    os.path.join(BASE_DIR, "themes"),
-    "Playlist":    os.path.join(BASE_DIR, "Playlist"),
-}
+# ── Auto-updater GitHub — SUPPRIMÉ (inutile avec installeur) ─────────────
 
 
-def _github_auto_update(blocking=False, progress_cb=None):
-    # Utilise os.environ pour garantir l'unicité même si utils.py
-    # est importé plusieurs fois sous des noms de modules différents
-    if os.environ.get("_BAKKYTRACK_UPDATE_DONE"):
-        return
-    os.environ["_BAKKYTRACK_UPDATE_DONE"] = "1"
+# ── Estimation progression division ─────────────────────────────────────
+def estimate_division_progress(tier_id: int, div_id: int, mmr: int) -> dict:
+    MMR_TIERS = {
+        0: 0, 1: 180, 2: 240, 3: 300,
+        4: 360, 5: 420, 6: 480,
+        7: 540, 8: 600, 9: 660,
+        10: 720, 11: 780, 12: 840,
+        13: 900, 14: 980, 15: 1060,
+        16: 1140, 17: 1260, 18: 1380,
+        19: 1500, 20: 1620, 21: 1740,
+        22: 1860
+    }
+    if tier_id <= 0 or tier_id >= 22 or not mmr:
+        return {"pct": 0, "next_mmr": 0, "prev_mmr": 0, "to_up": 0, "to_down": 0}
+    base_mmr = MMR_TIERS.get(tier_id, 900)
+    next_base = MMR_TIERS.get(tier_id + 1, base_mmr + 80)
+    tier_size = next_base - base_mmr
+    div_size = tier_size / 4
+    div_idx = max(0, min(3, div_id - 1))
+    div_min = base_mmr + (div_idx * div_size)
+    div_max = div_min + div_size
+    curr_mmr = max(div_min, min(div_max, mmr))
+    pct = int(((curr_mmr - div_min) / div_size) * 100) if div_size > 0 else 0
+    to_up = int(div_max - mmr)
+    to_down = int(mmr - div_min)
+    return {
+        "pct": pct,
+        "next_mmr": int(div_max),
+        "prev_mmr": int(div_min),
+        "to_up": max(1, to_up),
+        "to_down": max(1, to_down)
+    }
 
-    def _log(msg):
-        print(msg)
-        if progress_cb:
-            try: progress_cb(msg)
-            except Exception: pass
 
-    def _urlopen(req, timeout=10):
-        ctx = SSL_CTX if SSL_CTX is not None else SSL_CTX_NOVERIFY
+# ── Authentification compte bot (ajouté) ────────────────────────────────
+# Note PyInstaller : ajouter 'rlapi' et 'rlapi.egs' dans hiddenimports du .spec
+
+def extract_auth_code(text: str) -> str:
+    """Extrait un code d'autorisation Epic (32 hex) depuis un texte ou URL."""
+    if not text:
+        return ""
+    match = re.search(r'(?:code=|"authorizationCode"\s*:\s*")([0-9a-fA-F]{32})', text, re.IGNORECASE)
+    if match:
+        return match.group(1).lower()
+    match = re.search(r'\b([0-9a-fA-F]{32})\b', text)
+    if match:
+        return match.group(1).lower()
+    return ""
+
+def open_browser_and_wait_for_code(timeout=120) -> Optional[str]:
+    """
+    Ouvre le navigateur sur la page d'authentification Epic,
+    attend que l'utilisateur se connecte et tente de capturer le code d'autorisation
+    depuis le presse‑papier ou l'URL.
+    Retourne le code (str) ou None.
+    """
+    from rlapi.egs import EGS
+    egs = EGS()
+    auth_url = egs.get_auth_url()
+    egs.close()
+    webbrowser.open(auth_url)
+
+    time.sleep(2)
+    start_time = time.time()
+    clipboard_content = ""
+    last_clipboard = ""
+    while time.time() - start_time < timeout:
         try:
-            return urllib.request.urlopen(req, timeout=timeout, context=ctx)
-        except Exception as e:
-            if "SSL" in str(e) or "certificate" in str(e).lower():
-                _log(f"[Updater] SSL fallback pour {req.full_url[:60]}")
-                return urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX_NOVERIFY)
-            raise
+            if ctypes.windll.user32.OpenClipboard(None):
+                h_data = ctypes.windll.user32.GetClipboardData(13)  # CF_UNICODETEXT
+                if h_data:
+                    ptr = ctypes.windll.kernel32.GlobalLock(h_data)
+                    if ptr:
+                        clipboard_content = ctypes.wstring_at(ptr)
+                        ctypes.windll.kernel32.GlobalUnlock(h_data)
+                ctypes.windll.user32.CloseClipboard()
+        except Exception:
+            pass
+        if clipboard_content and clipboard_content != last_clipboard:
+            code = extract_auth_code(clipboard_content)
+            if code:
+                return code
+            last_clipboard = clipboard_content
+        time.sleep(1)
+    return None
 
-    def _git_sha1(data: bytes) -> str:
-        header = f"blob {len(data)}\0".encode()
-        return hashlib.sha1(header + data).hexdigest()
+def authenticate_bot_account(signals=None) -> Optional[dict]:
+    """
+    Lance le flow d'authentification complet pour un compte bot Epic.
+    Retourne un dict contenant refresh_token, account_id, account_name.
+    En cas d'échec, retourne None.
+    """
+    from rlapi.egs import EGS
+    # Étape 1 : obtenir le code d'autorisation
+    code = open_browser_and_wait_for_code()
+    if not code:
+        if signals:
+            signals.log_event.emit("[Auth Bot] Échec : pas de code reçu.")
+        return None
 
-    def _update_dir(remote_path: str, local_dir: str):
-        os.makedirs(local_dir, exist_ok=True)
-        if os.path.isdir(local_dir) and any(os.path.isfile(os.path.join(local_dir, f)) for f in os.listdir(local_dir)):
-            _log(f"[Updater] {remote_path} — déjà présent localement, skip")
-            return
-        url = _GITHUB_API + urllib.parse.quote(remote_path)
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "BakkyTrack"})
-            with _urlopen(req, timeout=8) as r:
-                entries = json.loads(r.read())
-        except urllib.error.HTTPError as e:
-            if e.code == 403:
-                _log(f"[Updater] Limite GitHub pour {remote_path}.")
-            else:
-                _log(f"[Updater] Impossible de lister {remote_path} : {e}")
-            return
-        except Exception as e:
-            _log(f"[Updater] Impossible de lister {remote_path} : {e}")
-            return
-        time.sleep(0.5)
-        downloaded = 0
-        for entry in entries:
-            if entry.get("type") != "file":
-                continue
-            name       = entry["name"]
-            remote_sha = entry["sha"]
-            raw_url    = _GITHUB_RAW + urllib.parse.quote(f"{remote_path}/{name}")
-            local_path = os.path.join(local_dir, name)
-            if os.path.exists(local_path):
-                try:
-                    with open(local_path, "rb") as f:
-                        if _git_sha1(f.read()) == remote_sha:
-                            continue
-                except Exception:
-                    pass
-            try:
-                time.sleep(0.3)
-                req = urllib.request.Request(raw_url, headers={"User-Agent": "BakkyTrack"})
-                with _urlopen(req, timeout=10) as r:
-                    data = r.read()
-                with open(local_path, "wb") as f:
-                    f.write(data)
-                downloaded += 1
-                _log(f"[Updater] ✓ {remote_path}/{name}")
-            except urllib.error.HTTPError as e:
-                if e.code == 403:
-                    _log(f"[Updater] ✗ {remote_path}/{name} : Limite GitHub")
-                else:
-                    _log(f"[Updater] ✗ {remote_path}/{name} : {e}")
-            except Exception as e:
-                _log(f"[Updater] ✗ {remote_path}/{name} : {e}")
-        if downloaded == 0:
-            _log(f"[Updater] {remote_path} — déjà à jour")
+    egs = EGS()
+    try:
+        # Étape 2 : échanger le code contre un token launcher
+        launcher_token = egs.authenticate_with_code(code)
+        # Étape 3 : obtenir exchange code
+        exchange_code = egs.get_exchange_code(launcher_token.access_token)
+        # Étape 4 : obtenir token EOS final
+        eos_token = egs.exchange_eos_token(exchange_code)
 
-    def _run():
-        _log("[Updater] Vérification des mises à jour GitHub…")
-        for remote_path, local_dir in _UPDATE_DIRS.items():
-            _update_dir(remote_path, local_dir)
-        _logo_local = os.path.join(BASE_DIR, "logo.ico")
-        if os.path.exists(_logo_local):
-            _log("[Updater] logo.ico — déjà présent, skip")
-            return
-        _logo_url = _GITHUB_RAW + "BakkyTrack/logo.ico"
-        try:
-            time.sleep(0.5)
-            req = urllib.request.Request(_logo_url, headers={"User-Agent": "BakkyTrack"})
-            with _urlopen(req, timeout=8) as r:
-                data = r.read()
-            with open(_logo_local, "wb") as f:
-                f.write(data)
-            _log("[Updater] ✓ logo.ico")
-        except urllib.error.HTTPError as e:
-            if e.code == 403:
-                _log(f"[Updater] ✗ logo.ico : Limite GitHub")
-            else:
-                _log(f"[Updater] ✗ logo.ico : {e}")
-        except Exception as e:
-            _log(f"[Updater] ✗ logo.ico : {e}")
-        _log("[Updater] ✓ Terminé")
-
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
-    if blocking:
-        t.join(timeout=30)
+        result = {
+            "refresh_token": eos_token.refresh_token,
+            "account_id": eos_token.account_id,
+            "account_name": launcher_token.display_name,
+        }
+        if signals:
+            signals.log_event.emit(f"[Auth Bot] Connecté en tant que {launcher_token.display_name}")
+        return result
+    except Exception as e:
+        if signals:
+            signals.log_event.emit(f"[Auth Bot] Erreur : {e}")
+        return None
+    finally:
+        egs.close()
