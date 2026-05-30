@@ -47,27 +47,18 @@ except (ImportError, OSError):
 _dsc_instance: "_DSC | None" = None
 _dsc_active   = False
 import time
+import threading
+
 _dsc_last_scan_time = 0.0
 _DSC_SCAN_INTERVAL = 3.0  # limit device enumeration to once every 3 seconds if not active
+_dsc_is_scanning = False
 
-def _dsc_init() -> bool:
-    """Tente d'activer la DualSense via dualsense-controller. Idempotent et bridé dans le temps."""
-    global _dsc_instance, _dsc_active, _dsc_last_scan_time
-    if not _HAS_DSC:
-        return False
-    if _dsc_active and _dsc_instance is not None and _dsc_instance.is_active:
-        return True
-    
-    # Throttle scan rate to prevent high CPU / micro-stutters from continuous USB/HID device enumeration
-    now = time.time()
-    if now - _dsc_last_scan_time < _DSC_SCAN_INTERVAL:
-        return False
-    _dsc_last_scan_time = now
-
+def _dsc_scan_worker():
+    global _dsc_instance, _dsc_active, _dsc_is_scanning
     try:
         devs = _DSC.enumerate_devices()
         if not devs:
-            return False
+            return
         if _dsc_instance is not None:
             try:
                 _dsc_instance.deactivate()
@@ -82,11 +73,32 @@ def _dsc_init() -> bool:
         )
         _dsc_instance.activate()
         _dsc_active = True
-        return True
     except Exception:
         _dsc_instance = None
         _dsc_active   = False
+    finally:
+        _dsc_is_scanning = False
+
+def _dsc_init() -> bool:
+    """Tente d'activer la DualSense via dualsense-controller. Idempotent et bridé dans le temps."""
+    global _dsc_instance, _dsc_active, _dsc_last_scan_time, _dsc_is_scanning
+    if not _HAS_DSC:
         return False
+    if _dsc_active and _dsc_instance is not None and _dsc_instance.is_active:
+        return True
+    
+    # Throttle scan rate to prevent high CPU / micro-stutters from continuous USB/HID device enumeration
+    now = time.time()
+    if now - _dsc_last_scan_time < _DSC_SCAN_INTERVAL:
+        return False
+        
+    if _dsc_is_scanning:
+        return False
+
+    _dsc_last_scan_time = now
+    _dsc_is_scanning = True
+    threading.Thread(target=_dsc_scan_worker, daemon=True).start()
+    return False
 
 def _poll_dualsense() -> "XINPUT_STATE | None":
     """
@@ -417,6 +429,8 @@ def _poll_fallback():
 
 # ── API publique ─────────────────────────────────────────────────────────────
 
+_active_backend = -1  # -1 = none, 0 = dualsense, 1 = xinput, 2 = fallback
+
 def get_gamepad_state(user_index=0):
     """
     Retourne XINPUT_STATE ou None si aucune manette connectée.
@@ -426,20 +440,45 @@ def get_gamepad_state(user_index=0):
       1. XInput                — Windows uniquement, toutes manettes XInput
       2. Joystick brut pygame  — fallback PS4/PS5 via pygame.joystick
 
-    Assure-toi que pump() (ou pygame.event.get/pump) est appelé
-    dans ta boucle principale AVANT cet appel.
+    Une fois qu'une manette est trouvée, on ne cherche plus sur les autres backends.
     """
-    # 0. dualsense-controller (DualSense natif — multiplateforme)
+    global _active_backend
+
+    # ── Fast path si un backend est déjà actif ──
+    if _active_backend == 0:
+        st = _poll_dualsense()
+        if st is not None: return st
+        _active_backend = -1
+    elif _active_backend == 1:
+        st = _poll_xinput(user_index)
+        if st is not None: return st
+        _active_backend = -1
+    elif _active_backend == 2:
+        st = _poll_fallback()
+        if st is not None: return st
+        _active_backend = -1
+
+    # ── Recherche (aucun backend actif) ──
+    # 0. dualsense-controller
     st = _poll_dualsense()
     if st is not None:
+        _active_backend = 0
         return st
+        
     # 1. XInput (Windows)
     if sys.platform == "win32":
         st = _poll_xinput(user_index)
         if st is not None:
+            _active_backend = 1
             return st
-    # 2. Joystick brut (fallback PS4/PS5)
-    return _poll_fallback()
+            
+    # 2. Joystick brut (fallback)
+    st = _poll_fallback()
+    if st is not None:
+        _active_backend = 2
+        return st
+
+    return None
 
 # ── Diagnostic ───────────────────────────────────────────────────────────────
 

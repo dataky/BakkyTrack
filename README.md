@@ -13,7 +13,10 @@
 * **Icônes de Rangs et de Playlists** : Affiche de magnifiques badges de rang et de playlist pour identifier d'un coup d'œil le statut de chacun.
 
 ### 🕵️ 2. Détection Anti-Smurf & Overlay Lobby
-* **Alerte Smurfs** : Notre algorithme analyse le profil des joueurs en temps réel. Si un joueur a moins de **150 victoires** totales à son actif tout en ayant atteint le rang **Champion 1** (ou supérieur), l'application affiche un symbole d'avertissement **`⚠️`** à côté de son nom.
+* **Alerte Smurfs multi-niveaux** : Notre algorithme analyse le profil des joueurs en temps réel et s'adapte selon leur rang :
+  - **Champion et +** : moins de **250 victoires** OU TRN Score **< 150 000**.
+  - **Diamant & Platine** : moins de **120 victoires** OU TRN Score **< 80 000**.
+  L'application affiche alors un symbole d'avertissement **`⚠️ Smurf?`** à côté du pseudo si les critères de suspicion sont validés.
 * **Overlay Joueurs (Touche F7)** : Un overlay flottant en verre dépoli liste tous les joueurs actuellement présents dans votre match, séparés par équipe.
 * **Lien de Profil Rapide** : Cliquez sur le nom d'un joueur dans la liste pour ouvrir instantanément sa fiche de statistiques complète sur `tracker.network` dans votre navigateur par défaut.
 
@@ -47,9 +50,8 @@ BakkyTrack intègre un micro-serveur HTTP sur le port **8000** qui tourne en arr
 - **Flux SSE (`/events`)** : Envoie des mises à jour de stats en temps réel (Server-Sent Events) pour alimenter des pages web tierces ou des sources de navigateur OBS.
 - **REST API (`/stats`)** : Renvoie un payload JSON complet de vos données de session.
 
-### 📈 7. Historique Local SQLite & Graphiques
-* Enregistre chaque match dans une base de données locale sécurisée (`SQLite`).
-* Génère un graphique interactif de progression de MMR en direct pour voir vos pics et vos chutes de session.
+### 💾 7. Historique Local SQLite
+* Enregistre chaque match dans une base de données locale sécurisée (`SQLite`) pour conserver un suivi fiable de toutes vos sessions de jeu.
 
 ---
 

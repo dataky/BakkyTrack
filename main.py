@@ -3,6 +3,8 @@
 import sys
 import os
 import asyncio
+import logging
+from datetime import datetime
 
 if sys.platform == 'win32':
     try:
@@ -13,6 +15,34 @@ if sys.platform == 'win32':
 # ── Garantit que la racine du projet est dans sys.path ──────────────────
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ────────────────────────────────────────────────────────────────────────
+
+# ── File logger : redirige tout print() dans %LOCALAPPDATA%/BakkyTrack/logs/ ──
+_LOG_DIR = os.path.join(os.environ.get('LOCALAPPDATA', os.path.dirname(os.path.abspath(__file__))), "BakkyTrack", "logs")
+os.makedirs(_LOG_DIR, exist_ok=True)
+_LOG_FILE = os.path.join(_LOG_DIR, f"bakkytrack_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+
+class _TeeLogger:
+    """Écrit à la fois dans un fichier et dans la console."""
+    def __init__(self, log_path):
+        self._file = open(log_path, "w", encoding="utf-8")
+        self._stdout = sys.stdout
+    
+    def write(self, text):
+        self._file.write(text)
+        self._file.flush()
+        if self._stdout is not None:
+            self._stdout.write(text)
+    
+    def flush(self):
+        self._file.flush()
+        if self._stdout is not None:
+            self._stdout.flush()
+
+sys.stdout = _TeeLogger(_LOG_FILE)
+sys.stderr = sys.stdout
+print(f"= BakkyTrack démarré =")
+print(f"Les logs sont dans : {_LOG_FILE}")
+# ──────────────────────────────────────────────────────────────────────────
 
 from PyQt6.QtWidgets import QApplication, QSplashScreen
 from PyQt6.QtGui import QPixmap, QIcon

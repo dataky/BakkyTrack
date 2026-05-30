@@ -115,6 +115,12 @@ class MMRService:
         finally:
             self._fetch_lock.release()
 
+    def _get_rlapi_fetcher(self) -> RLAPIMmrFetcher:
+        """Retourne une instance singleton de RLAPIMmrFetcher."""
+        if not hasattr(self, '_rlapi_fetcher') or self._rlapi_fetcher is None:
+            self._rlapi_fetcher = RLAPIMmrFetcher(self.config, self.signals)
+        return self._rlapi_fetcher
+
     def _fetch_with_rlapi(self, player_name="", player_primary_id="", force=False):
         effective_primary_id = self.detected_primary_id or player_primary_id
         platform = self.config["platform"].lower()
@@ -136,7 +142,7 @@ class MMRService:
             return
 
         self.signals.log_event.emit("[RLAPI] Tentative de récupération MMR via RLAPI...")
-        fetcher = RLAPIMmrFetcher(self.config, self.signals)  # singleton
+        fetcher = self._get_rlapi_fetcher()  # singleton réutilisé
         try:
             if epic_id:
                 data = fetcher.fetch_sync(username, platform, user_id=epic_id)

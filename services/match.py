@@ -176,7 +176,7 @@ class MatchService:
             self.current_game_state = game
             self.current_players = players
             _ball_speed_kmh = game.get("Ball", {}).get("Speed", 0.0)
-            self.signals.ball_speed_updated.emit(round(_ball_speed_kmh, 1))
+            self.signals.ball_speed_updated.emit(round(_ball_speed_kmh, 3))
             new_names = tuple(p.get("Name") for p in players)
             if new_names != self._current_player_names:
                 self._current_player_names = new_names

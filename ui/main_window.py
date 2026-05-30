@@ -53,8 +53,13 @@ class MainApp(QMainWindow):
         # Thread pool centralisé pour toutes les tâches réseau/IO
         self._thread_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="bakkytrack")
         self.overlay_win         = OverlayWindow()
-        if self.config.get("pos_main_overlay"):
-            self.overlay_win.move(*self.config.get("pos_main_overlay"))
+        pos_main = self.config.get("pos_main_overlay")
+        if pos_main and len(pos_main) == 2:
+            screen = QApplication.primaryScreen().geometry()
+            sw, sh = screen.width(), screen.height()
+            x = int(pos_main[0]) if float(pos_main[0]) > 1.0 else int(pos_main[0] * sw)
+            y = int(pos_main[1]) if float(pos_main[1]) > 1.0 else int(pos_main[1] * sh)
+            self.overlay_win.move(int(x), int(y))
             
         self.players_overlay_win = PlayersOverlayWindow(self.sound, self.db)
         self.result_overlay      = ResultOverlay()
@@ -62,9 +67,15 @@ class MainApp(QMainWindow):
         self.ingame_mmr_overlay.set_show_peak(self.config.get("tab_show_peak", True))
         
         self.controller_overlay  = ControllerOverlay(
-            self.config.get("controller_overlay_mode", "with_bg"))
-        if self.config.get("pos_ctrl_overlay"):
-            self.controller_overlay.move(*self.config.get("pos_ctrl_overlay"))
+            self.config.get("controller_overlay_mode", "with_bg"),
+            config=self.config)
+        pos_ctrl = self.config.get("pos_ctrl_overlay")
+        if pos_ctrl and len(pos_ctrl) == 2:
+            screen = QApplication.primaryScreen().geometry()
+            sw, sh = screen.width(), screen.height()
+            x = int(pos_ctrl[0]) if float(pos_ctrl[0]) > 1.0 else int(pos_ctrl[0] * sw)
+            y = int(pos_ctrl[1]) if float(pos_ctrl[1]) > 1.0 else int(pos_ctrl[1] * sh)
+            self.controller_overlay.move(int(x), int(y))
             
         if self.config.get("controller_overlay_enabled", False):
             self.controller_overlay.show()
@@ -469,10 +480,12 @@ class MainApp(QMainWindow):
 
     def closeEvent(self, event):
         try:
-            self.config["pos_main_overlay"] = (self.overlay_win.x(), self.overlay_win.y())
-            self.config["pos_ctrl_overlay"] = (self.controller_overlay.x(), self.controller_overlay.y())
+            screen = QApplication.primaryScreen().geometry()
+            sw, sh = screen.width(), screen.height()
+            self.config["pos_main_overlay"] = (self.overlay_win.x() / sw, self.overlay_win.y() / sh)
+            self.config["pos_ctrl_overlay"] = (self.controller_overlay.x() / sw, self.controller_overlay.y() / sh)
             if getattr(self.overlay_auto_tab, "_ball_overlay_win", None):
-                self.config["pos_ball_overlay"] = (self.overlay_auto_tab._ball_overlay_win.x(), self.overlay_auto_tab._ball_overlay_win.y())
+                self.config["pos_ball_overlay"] = (self.overlay_auto_tab._ball_overlay_win.x() / sw, self.overlay_auto_tab._ball_overlay_win.y() / sh)
             self.config.save()
         except Exception: pass
         try: self._overlay_timer.stop()

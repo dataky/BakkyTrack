@@ -2,6 +2,7 @@
 import sys, math
 from PyQt6.QtCore    import Qt, QPointF, QRectF, QTimer
 from PyQt6.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QLabel, QApplication
+from config import Config
 from PyQt6.QtGui     import QPainter, QColor, QBrush, QPen, QLinearGradient, QFont
 from style import C_MUTE, C_BLUE, C_ORG, C_TEXT
 from gamepad_state import get_gamepad_state
@@ -113,7 +114,7 @@ class _CtrlCanvas(QWidget):
 
 
 class ControllerOverlay(QMainWindow):
-    def __init__(self, mode="with_bg"):
+    def __init__(self, mode="with_bg", config=None):
         super().__init__()
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint |
@@ -123,9 +124,10 @@ class ControllerOverlay(QMainWindow):
         self._canvas = _CtrlCanvas(mode); self.setCentralWidget(self._canvas)
         self.setFixedSize(self._canvas.width(), self._canvas.height())
         self._drag_pos = None
+        self._config = config
         self._canvas.mousePressEvent = self._mp; self._canvas.mouseMoveEvent = self._mm
+        self._canvas.mouseReleaseEvent = self._mr
         self._poll_timer = QTimer(self); self._poll_timer.timeout.connect(self._poll)
-        self._poll_timer.start(16)
         self._top_timer = QTimer(self); self._top_timer.timeout.connect(self._enforce_topmost)
         self._top_timer.start(2000)
 
@@ -137,16 +139,44 @@ class ControllerOverlay(QMainWindow):
         if e.buttons() & Qt.MouseButton.LeftButton and self._drag_pos:
             self.move(e.globalPosition().toPoint() - self._drag_pos)
 
+    def _mr(self, e):
+        if self._drag_pos and self._config:
+            p = self.pos()
+            screen = QApplication.primaryScreen().geometry()
+            sw, sh = screen.width(), screen.height()
+            self._config["pos_ctrl_overlay"] = (p.x() / sw, p.y() / sh)
+            self._config.save()
+            self._drag_pos = None
+
     def showEvent(self, e):
         super().showEvent(e); self._enforce_topmost()
+        if not self._poll_timer.isActive():
+            self._poll_timer.start(16)
+        if not hasattr(self, "_pos_restored"):
+            self._pos_restored = True
+            if self._config:
+                pos = self._config.get("pos_ctrl_overlay")
+                if pos and len(pos) == 2:
+                    screen = QApplication.primaryScreen().geometry()
+                    sw, sh = screen.width(), screen.height()
+                    x = int(pos[0]) if float(pos[0]) > 1.0 else int(pos[0] * sw)
+                    y = int(pos[1]) if float(pos[1]) > 1.0 else int(pos[1] * sh)
+                    self.move(int(x), int(y))
+                    return
         screen = QApplication.primaryScreen().availableGeometry()
         self.move(screen.right()-self.width()-20, screen.bottom()-self.height()-60)
+
+    def hideEvent(self, e):
+        super().hideEvent(e)
+        self._poll_timer.stop()
 
     def _enforce_topmost(self):
         enforce_topmost(self)
 
     def _poll(self):
         try:
+            from gamepad_state import pump
+            pump()
             state = get_gamepad_state(0)
             self._canvas.set_state(state)
         except Exception:

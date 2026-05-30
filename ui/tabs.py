@@ -580,7 +580,6 @@ class OverlayAutoTab(QWidget):
         self._ball_speed_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._ball_speed_val.setStyleSheet(f"color:{C_GOLD};font-size:18px;font-weight:900;background:transparent;")
         live_v.addWidget(self._ball_speed_val)
-        live_v.addWidget(lbl("km/h", C_MUTE, 7), alignment=Qt.AlignmentFlag.AlignCenter)
         header_row.addWidget(live_box)
         ball.addLayout(header_row)
 
@@ -637,6 +636,22 @@ class OverlayAutoTab(QWidget):
         font_hint = lbl("Taille du texte affiché sur l'overlay", C_MUTE, 8)
         ball.addWidget(font_hint)
 
+        # ── Nombre de décimales ──────────────────────────────────────────
+        dec_row = QHBoxLayout()
+        dec_row.setSpacing(6)
+        dec_row.addWidget(lbl("Décimales :", C_TEXT, 10))
+        self._ball_dec_btns = {}
+        current_dec = int(self.app.config.get("ball_speed_decimals", 2))
+        for d in [0, 1, 2, 3]:
+            b = btn(str(d), bg=C_BG3, fg=C_MUTE, size=9)
+            b.setFixedSize(36, 28)
+            b.clicked.connect(lambda _, val=d: self._set_ball_decimals(val))
+            dec_row.addWidget(b)
+            self._ball_dec_btns[d] = b
+        dec_row.addStretch()
+        ball.addLayout(dec_row)
+        self._highlight_ball_decimals(current_dec)
+
         def _on_font_size(v):
             self._ball_font_val.setText(f"{v}px")
             self.app.config["ball_overlay_font_size"] = v
@@ -654,9 +669,15 @@ class OverlayAutoTab(QWidget):
 
         root.addWidget(ball_card)
 
-        # Réactiver l'overlay si actif dans la config
+        # ── Reset positions de tous les overlays ──────────────────────────
+        reset_ovl_btn = btn("🔄  Réinitialiser la position de TOUS les overlays", bg=C_BG3, fg=C_MUTE, size=9)
+        reset_ovl_btn.setFixedHeight(28)
+        reset_ovl_btn.clicked.connect(self._reset_overlays_positions)
+        root.addWidget(reset_ovl_btn, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        # Restaurer l'overlay si actif dans la config (sans retoggle)
         if self._ball_overlay_active:
-            QTimer.singleShot(200, lambda: self._toggle_ball_overlay(save=False))
+            QTimer.singleShot(200, lambda: self._restore_ball_overlay())
 
         # Connecter le signal de vitesse balle pour l'affichage dans l'onglet
         self.app.signals.ball_speed_updated.connect(self._on_ball_speed)
@@ -863,6 +884,25 @@ class OverlayAutoTab(QWidget):
                 f"border:none;border-radius:6px;padding:4px 10px;font-size:9px;font-weight:700;}}"
                 f"{'' if active else 'QPushButton:hover{color:' + C_TEXT + ';}'}")
 
+    def _restore_ball_overlay(self):
+        """Restaure l'overlay vitesse au démarrage sans toggle (utilise l'état sauvegardé)."""
+        if self._ball_overlay_win is None:
+            from ui.ball_speed_overlay import BallSpeedOverlay
+            self._ball_overlay_win = BallSpeedOverlay(self.app.signals, self.app.config)
+            pos = self.app.config.get("pos_ball_overlay")
+            if pos and len(pos) == 2:
+                from PyQt6.QtWidgets import QApplication
+                screen = QApplication.primaryScreen().geometry()
+                sw, sh = screen.width(), screen.height()
+                x = int(pos[0]) if float(pos[0]) > 1.0 else int(pos[0] * sw)
+                y = int(pos[1]) if float(pos[1]) > 1.0 else int(pos[1] * sh)
+                self._ball_overlay_win.move(int(x), int(y))
+        self._ball_overlay_win.show()
+        self._ball_ovl_btn.setText("⚽  DÉSACTIVER OVERLAY VITESSE")
+        self._ball_ovl_btn.setStyleSheet(
+            f"QPushButton{{background:{C_ORG};color:{C_TEXT};border:none;border-radius:6px;padding:4px 10px;font-size:10px;font-weight:700;}}"
+            f"QPushButton:hover{{background:#e06000;}}")
+
     def _toggle_ball_overlay(self, *args, save=True):
         self._ball_overlay_active = not self._ball_overlay_active
         if save:
@@ -873,8 +913,13 @@ class OverlayAutoTab(QWidget):
                 from ui.ball_speed_overlay import BallSpeedOverlay
                 self._ball_overlay_win = BallSpeedOverlay(self.app.signals, self.app.config)
                 pos = self.app.config.get("pos_ball_overlay")
-                if pos:
-                    self._ball_overlay_win.move(*pos)
+                if pos and len(pos) == 2:
+                    from PyQt6.QtWidgets import QApplication
+                    screen = QApplication.primaryScreen().geometry()
+                    sw, sh = screen.width(), screen.height()
+                    x = int(pos[0]) if float(pos[0]) > 1.0 else int(pos[0] * sw)
+                    y = int(pos[1]) if float(pos[1]) > 1.0 else int(pos[1] * sh)
+                    self._ball_overlay_win.move(int(x), int(y))
             self._ball_overlay_win.show()
             self._ball_ovl_btn.setText("⚽  DÉSACTIVER OVERLAY VITESSE")
             self._ball_ovl_btn.setStyleSheet(
@@ -889,8 +934,63 @@ class OverlayAutoTab(QWidget):
                 f"QPushButton:hover{{background:{C_BG3}cc;}}")
 
     def _on_ball_speed(self, kmh: float):
-        self._ball_speed_val.setText(f"{kmh:.0f}")
+        # Throttlé : ne pas rafraîchir le QLabel + barre plus de ~15 fois/sec
+        now = time.time()
+        if hasattr(self, '_ball_speed_last_ui') and now - self._ball_speed_last_ui < 0.065:
+            return
+        self._ball_speed_last_ui = now
+        decimals = int(self.app.config.get("ball_speed_decimals", 2))
+        self._ball_speed_val.setText(f"{kmh:.{decimals}f}")
         self._ball_speed_bar.setValue(min(216, int(kmh)))
+
+    def _set_ball_decimals(self, val: int):
+        """Change le nombre de décimales affiché sur l'overlay vitesse."""
+        self.app.config["ball_speed_decimals"] = val
+        self.app.config.save()
+        self._highlight_ball_decimals(val)
+        # Met à jour l'overlay live si actif (via setter direct)
+        if self._ball_overlay_win is not None:
+            self._ball_overlay_win.set_decimals(val)
+
+    def _reset_overlays_positions(self):
+        """Remet tous les overlays au centre de l'écran."""
+        from PyQt6.QtWidgets import QApplication
+        screen = QApplication.primaryScreen().geometry()
+        cx = screen.width() // 2
+        cy = screen.height() // 2
+
+        # Overlay vitesse balle
+        self.app.config["pos_ball_overlay"] = (cx / screen.width(), cy / screen.height())
+        if self._ball_overlay_win is not None:
+            self._ball_overlay_win.move(cx - self._ball_overlay_win.width() // 2,
+                                        cy - self._ball_overlay_win.height() // 2)
+
+        # Overlay principal
+        if hasattr(self.app, 'overlay_win') and self.app.overlay_win is not None:
+            self.app.overlay_win.move(cx - self.app.overlay_win.width() // 2,
+                                      cy - self.app.overlay_win.height() // 2)
+
+        # Overlay manette
+        if hasattr(self.app, 'controller_overlay') and self.app.controller_overlay is not None:
+            self.app.controller_overlay.move(cx - self.app.controller_overlay.width() // 2,
+                                             cy - self.app.controller_overlay.height() // 2)
+
+        # Overlay joueurs ingame
+        if hasattr(self.app, 'ingame_mmr_overlay') and self.app.ingame_mmr_overlay is not None:
+            self.app.ingame_mmr_overlay.move(cx - self.app.ingame_mmr_overlay.width() // 2,
+                                             cy - self.app.ingame_mmr_overlay.height() // 2)
+
+        self.app.config.save()
+        self.app.signals.log_event.emit("✓ Positions des overlays réinitialisées au centre")
+
+    def _highlight_ball_decimals(self, val: int):
+        """Met en surbrillance le bouton de décimales sélectionné."""
+        for d, b in self._ball_dec_btns.items():
+            active = d == val
+            b.setStyleSheet(
+                f"QPushButton{{background:{C_BLUE if active else C_BG3};color:{C_TEXT if active else C_MUTE};"
+                f"border:none;border-radius:6px;padding:4px 8px;font-size:9px;font-weight:700;}}"
+                f"{'' if active else 'QPushButton:hover{color:' + C_TEXT + ';}'}")
 
     def _reconfigure_hotkey(self):
         dlg = OverlayBindDialog(self.window())
