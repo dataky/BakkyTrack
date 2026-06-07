@@ -140,8 +140,11 @@ class SoundService:
                 if not os.path.exists(path):
                     self.signals.log_event.emit(f"[Son] Fichier introuvable: {f}")
                     return
-                if not pygame.mixer.get_init():
-                    pygame.mixer.init()
+                try:
+                    if not pygame.mixer.get_init():
+                        pygame.mixer.init()
+                except Exception:
+                    pass
                 snd = pygame.mixer.Sound(path)
                 vol = self.config.get("sound_volume", 100) / 100.0
                 snd.set_volume(max(0.0, min(1.0, vol)))

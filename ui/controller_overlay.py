@@ -20,6 +20,25 @@ class _CtrlCanvas(QWidget):
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._mode  = mode; self._state = None; self._update_size()
+        
+        # Cache fonts to avoid recreating QFont objects on every paint event
+        self._font_title = QFont()
+        self._font_title.setPointSize(8)
+        self._font_title.setWeight(QFont.Weight.Bold)
+        
+        self._font_cross = QFont()
+        self._font_cross.setPointSize(8)
+        
+        self._font_none = QFont()
+        self._font_none.setPointSize(9)
+        
+        self._font_btn = QFont()
+        self._font_btn.setPointSize(8)
+        self._font_btn.setWeight(QFont.Weight.Bold)
+        
+        self._font_abxy = QFont()
+        self._font_abxy.setPointSize(8)
+        self._font_abxy.setWeight(QFont.Weight.Black)
 
     def _update_size(self):
         h = self.H_BG if self._mode == "with_bg" else self.H_TR
@@ -40,14 +59,13 @@ class _CtrlCanvas(QWidget):
         if self._mode == "with_bg":
             p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(QColor(34,36,46,240)))
             p.drawRoundedRect(0,0,W,H,8,8)
-            font_t = QFont(); font_t.setPointSize(8); font_t.setWeight(QFont.Weight.Bold)
-            p.setFont(font_t); p.setPen(QColor(190,193,205))
+            p.setFont(self._font_title); p.setPen(QColor(190,193,205))
             p.drawText(QRectF(0,0,W-28,24), Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter, "Controller Overlay")
-            p.setPen(QColor(120,125,140)); font_x = QFont(); font_x.setPointSize(8); p.setFont(font_x)
+            p.setPen(QColor(120,125,140)); p.setFont(self._font_cross)
             p.drawText(QRectF(W-24,0,20,24), Qt.AlignmentFlag.AlignCenter, "✕")
             p.setPen(QPen(QColor(50,54,68),1)); p.drawLine(0,24,W,24)
         if self._state is None:
-            font_n = QFont(); font_n.setPointSize(9); p.setFont(font_n); p.setPen(QColor(C_MUTE))
+            p.setFont(self._font_none); p.setPen(QColor(C_MUTE))
             p.drawText(QRectF(0,top,W,H-top), Qt.AlignmentFlag.AlignCenter, "Aucune manette détectée"); p.end(); return
         gp = self._state.Gamepad; btns = gp.wButtons
         lt = gp.bLeftTrigger/255.0; rt = gp.bRightTrigger/255.0
@@ -71,7 +89,7 @@ class _CtrlCanvas(QWidget):
             fill_w = max(6.0, rw*fill)
             col = QColor("#4a9eff") if analog else QColor(200,205,220)
             p.setBrush(QBrush(col)); p.drawRoundedRect(QRectF(x,y,fill_w,rh),4,4)
-        fn = QFont(); fn.setPointSize(8); fn.setWeight(QFont.Weight.Bold); p.setFont(fn)
+        p.setFont(self._font_btn)
         pressed = fill > 0.05; p.setPen(QColor(255,255,255) if pressed else QColor(155,160,175))
         p.drawText(QRectF(x,y,rw,rh), Qt.AlignmentFlag.AlignCenter, label)
 
@@ -99,7 +117,7 @@ class _CtrlCanvas(QWidget):
         D = 30; R = 15
         layout = [("Y", self._Y, 0, -D, "#FFD700"), ("B", self._B, D, 0, "#FF3D57"),
                   ("A", self._A, 0, D, "#3AE08A"), ("X", self._X, -D, 0, "#1A8CFF")]
-        fn = QFont(); fn.setPointSize(8); fn.setWeight(QFont.Weight.Black); p.setFont(fn)
+        p.setFont(self._font_abxy)
         for label, mask, ox, oy, color in layout:
             pressed = bool(btns & mask); bx = cx+ox; by = cy+oy; col = QColor(color)
             p.setPen(Qt.PenStyle.NoPen)

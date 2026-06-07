@@ -10,6 +10,7 @@ class MMRService:
     _CACHE_PATH  = os.path.join(_CACHE_DIR, "mmr_cache.json")
     _MAX_RETRIES = 3
     _RETRY_WAIT  = 4
+    _PEAK_FETCH_INTERVAL = 300
 
     _RANKS = RANKS
     _PLAYLIST_IDS = {10: "1v1", 11: "2v2", 13: "3v3"}
@@ -26,12 +27,21 @@ class MMRService:
         }
         self._load_cache()
         self.detected_primary_id = None
+        self._last_player_name = ""
+        self._last_player_primary_id = ""
         self._fetch_lock = threading.Lock()
+        self._peak_fetch_lock = threading.Lock()
+        self._peak_refresh_timer = None
+        self._first_peak_fetch_done = False
         # Connexion au signal de détection avec ID
         self.signals.player_detected_with_id.connect(self._on_player_detected)
 
     def _on_player_detected(self, name, team, primary_id):
         self.detected_primary_id = primary_id
+        if name:
+            self._last_player_name = name
+        if primary_id:
+            self._last_player_primary_id = primary_id
         self.signals.log_event.emit(f"[MMR] ID détecté en jeu: {primary_id}")
 
     def _tier_id(self, rank_name: str) -> int:
@@ -67,7 +77,8 @@ class MMRService:
                 k: {"mmr": v["mmr"], "rank": v.get("rank", ""),
                     "tier_id": v.get("tier_id", 0), "div_id": v.get("div_id", 0),
                     **({"peak_mmr": v["peak_mmr"]} if v.get("peak_mmr") else {})}
-                for k, v in self.all_mmr.items() if v["mmr"] is not None
+                for k, v in self.all_mmr.items()
+                if v["mmr"] is not None or v.get("peak_mmr") is not None
             }
             with open(self._CACHE_PATH, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
@@ -89,6 +100,27 @@ class MMRService:
             return
         try:
             preferred = self.config.get("mmr_source", "rlapi")
+
+            if player_name:
+                self._last_player_name = player_name
+            if player_primary_id:
+                self._last_player_primary_id = player_primary_id
+
+            # Détecter si on a un nom d'utilisateur valide pour récupérer le Peak
+            platform = self.config["platform"].lower()
+            slug = self._PLATFORM_SLUG.get(platform, "epic")
+            username = ""
+            eff_id = player_primary_id or self.detected_primary_id or self._last_player_primary_id or ""
+            if slug == "steam":
+                if eff_id.startswith("Steam|"):
+                    parts = eff_id.split("|")
+                    username = parts[1] if len(parts) >= 2 else ""
+            if not username:
+                username = self.config["username"] or player_name or self._last_player_name or ""
+
+            if username and not self._first_peak_fetch_done:
+                self.fetch_peak_async(username, eff_id, force=True)
+                self._first_peak_fetch_done = True
 
             if preferred != "rlapi":
                 # Cooldown uniquement pour tracker.gg (évite les rate limits)
@@ -120,6 +152,97 @@ class MMRService:
         if not hasattr(self, '_rlapi_fetcher') or self._rlapi_fetcher is None:
             self._rlapi_fetcher = RLAPIMmrFetcher(self.config, self.signals)
         return self._rlapi_fetcher
+
+    def fetch_peak_async(self, player_name="", player_primary_id="", force=False):
+        if not self._peak_fetch_lock.acquire(blocking=False):
+            self.signals.log_event.emit("[MMR] Peak tracker déjà en cours, ignoré.")
+            return
+
+        def _worker():
+            try:
+                self._fetch_peak_tracker(player_name, player_primary_id, force)
+            finally:
+                self._peak_fetch_lock.release()
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _schedule_peak_refresh(self):
+        if self._peak_refresh_timer is not None:
+            try:
+                self._peak_refresh_timer.cancel()
+            except Exception:
+                pass
+        self._peak_refresh_timer = threading.Timer(self._PEAK_FETCH_INTERVAL, self.fetch_peak_async)
+        self._peak_refresh_timer.daemon = True
+        self._peak_refresh_timer.start()
+
+    def _fetch_peak_tracker(self, player_name="", player_primary_id="", force=False):
+        platform = self.config["platform"].lower()
+        slug = self._PLATFORM_SLUG.get(platform, "epic")
+        
+        effective_primary_id = player_primary_id or self.detected_primary_id or self._last_player_primary_id or ""
+        effective_player_name = player_name or self._last_player_name or ""
+
+        if slug == "steam":
+            if effective_primary_id.startswith("Steam|"):
+                parts = effective_primary_id.split("|")
+                username = parts[1] if len(parts) >= 2 else ""
+            else:
+                username = self.config["username"] or effective_player_name
+            encoded = username
+        else:
+            username = self.config["username"] or effective_player_name
+            encoded = urllib.parse.quote(username, safe="")
+        if not username:
+            self._schedule_peak_refresh()
+            return
+
+        url = (f"https://api.tracker.gg/api/v2/rocket-league/standard/profile"
+               f"/{slug}/{encoded}")
+        for attempt in range(1, self._MAX_RETRIES + 1):
+            try:
+                req = urllib.request.Request(url, headers=TRACKER_HEADERS)
+                self.signals.log_event.emit(
+                    f"[MMR] Peak tracker tentative {attempt}/{self._MAX_RETRIES} — {username} ({slug})…")
+                try:
+                    with urllib.request.urlopen(req, context=SSL_CTX, timeout=10) as resp:
+                        raw = resp.read().decode("utf-8")
+                except Exception:
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        raw = resp.read().decode("utf-8")
+                data = json.loads(raw)
+                if not isinstance(data.get("data"), dict):
+                    raise ValueError("tracker.gg : pas de données de profil")
+
+                updated = False
+                for seg in data["data"].get("segments", []):
+                    if seg.get("type") != "peak-rating":
+                        continue
+                    pid_val = seg.get("attributes", {}).get("playlistId")
+                    pl_key = self._PLAYLIST_IDS.get(pid_val)
+                    peak_val = seg.get("stats", {}).get("peakRating", {}).get("value")
+                    if pl_key and peak_val:
+                        self.all_mmr[pl_key]["peak_mmr"] = int(peak_val)
+                        updated = True
+
+                if updated:
+                    self._save_cache()
+                    self.signals.mmr_updated.emit()
+                    self.signals.log_event.emit("✓ Peak RL tracker mis à jour")
+                else:
+                    self.signals.log_event.emit("[MMR] Peak tracker : aucun peak trouvé")
+                self._schedule_peak_refresh()
+                return
+            except Exception as e:
+                self.signals.log_event.emit(
+                    f"[MMR] Peak tracker erreur tentative {attempt}: {str(e)[:60]}")
+                if attempt < self._MAX_RETRIES:
+                    time.sleep(self._RETRY_WAIT * attempt)
+                    continue
+                self.signals.mmr_error.emit(
+                    f"Échec peak tracker après {self._MAX_RETRIES} tentatives: {str(e)[:55]}")
+                self._schedule_peak_refresh()
+                return
 
     def _fetch_with_rlapi(self, player_name="", player_primary_id="", force=False):
         effective_primary_id = self.detected_primary_id or player_primary_id
@@ -163,8 +286,6 @@ class MMRService:
                 d["rank"] = values["rank"]
                 d["tier_id"] = values["tier_id"]
                 d["div_id"] = values["div_id"]
-                if values.get("peak_mmr"):
-                    d["peak_mmr"] = values["peak_mmr"]
         self._save_cache()
         self.signals.mmr_updated.emit()
         self.signals.log_event.emit("✓ MMR & Ranks mis à jour (RLAPI officiel)")
@@ -230,14 +351,6 @@ class MMRService:
                     updated = True
                 if not updated:
                     raise ValueError("Aucune playlist ranked trouvée dans le profil")
-                for seg in data["data"].get("segments", []):
-                    if seg.get("type") != "peak-rating":
-                        continue
-                    pid      = seg.get("attributes", {}).get("playlistId")
-                    pl_key   = self._PLAYLIST_IDS.get(pid)
-                    peak_val = seg.get("stats", {}).get("peakRating", {}).get("value")
-                    if pl_key and peak_val:
-                        self.all_mmr[pl_key]["peak_mmr"] = int(peak_val)
                 self._save_cache()
                 self.signals.mmr_updated.emit()
                 self.signals.log_event.emit("✓ MMR & Ranks mis à jour (tracker.gg)")

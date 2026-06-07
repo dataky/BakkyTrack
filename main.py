@@ -19,6 +19,25 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ── File logger : redirige tout print() dans %LOCALAPPDATA%/BakkyTrack/logs/ ──
 _LOG_DIR = os.path.join(os.environ.get('LOCALAPPDATA', os.path.dirname(os.path.abspath(__file__))), "BakkyTrack", "logs")
 os.makedirs(_LOG_DIR, exist_ok=True)
+
+# Nettoyage automatique des anciens logs (garder uniquement les 5 plus récents)
+try:
+    _log_files = []
+    for _f in os.listdir(_LOG_DIR):
+        if _f.startswith("bakkytrack_") and _f.endswith(".log"):
+            _path = os.path.join(_LOG_DIR, _f)
+            _log_files.append((_path, os.path.getmtime(_path)))
+    # Trier par date de modification décroissante (du plus récent au plus ancien)
+    _log_files.sort(key=lambda x: x[1], reverse=True)
+    # Supprimer tous les fichiers au-delà des 5 plus récents
+    for _path, _ in _log_files[5:]:
+        try:
+            os.remove(_path)
+        except Exception:
+            pass
+except Exception:
+    pass
+
 _LOG_FILE = os.path.join(_LOG_DIR, f"bakkytrack_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
 
 class _TeeLogger:

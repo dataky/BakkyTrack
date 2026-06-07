@@ -1026,19 +1026,13 @@ _SOUND_EVENTS = [
 
 
 class SettingsTab(QWidget):
-    """Paramètres : joueur, mode streamer, anti-smurf, overlay résultat, OBS, webhook, sons, statsAPI, compte bot."""
-
-    _bot_auth_done = _pyqtSignal(object)
-    _bot_url_ready = _pyqtSignal(str)
+    """Paramètres : joueur, mode streamer, anti-smurf, overlay résultat, OBS, webhook, sons, statsAPI."""
 
     def __init__(self, app_ref):
         super().__init__()
         self.app = app_ref
-        self._bot_auth_done.connect(self._on_auth_finished)
-        self._bot_url_ready.connect(self._show_auth_url)
         self._streamer_active = self.app.config.get("streamer_mode", False)
         self._build()
-        self._load_bot_account_on_startup()
         self._update_streamer_btn()
 
     def _build(self):
@@ -1203,50 +1197,6 @@ class SettingsTab(QWidget):
         al.addWidget(self._ini_status)
         root.addWidget(api_card)
 
-        # ── COMPTE BOT ────────────────────────────────────────────────────
-        bot_card = card()
-        bot_layout = QVBoxLayout(bot_card)
-        bot_layout.setContentsMargins(14, 10, 14, 10)
-        bot_layout.setSpacing(8)
-        bot_layout.addWidget(lbl("COMPTE BOT API ROCKET LEAGUE", C_MUTE, 9))
-        self.bot_status = lbl("Non configuré", C_ORG, 9)
-        bot_layout.addWidget(self.bot_status)
-        self.bot_login_btn = btn("🔑  Connecter un compte secondaire", bg=C_BLUE, fg=C_TEXT, size=10)
-        self.bot_login_btn.clicked.connect(self._start_bot_auth)
-        bot_layout.addWidget(self.bot_login_btn)
-
-        self.bot_instructions = lbl(
-            "1. Connecte-toi sur la page Epic qui vient de s'ouvrir.\n"
-            "2. Clique sur « Ouvrir la page du code ».\n"
-            "3. Copie le code ci-dessous et clique Valider.", C_MUTE, 9)
-        self.bot_instructions.setWordWrap(True)
-        self.bot_instructions.hide()
-        bot_layout.addWidget(self.bot_instructions)
-
-        self.bot_open_code_btn = btn("🌐  Ouvrir la page du code", bg=C_BG3, fg=C_TEXT, size=9)
-        self.bot_open_code_btn.clicked.connect(self._open_auth_code_page)
-        self.bot_open_code_btn.hide()
-        bot_layout.addWidget(self.bot_open_code_btn)
-        self._bot_auth_url = ""
-
-        bot_code_row = QHBoxLayout()
-        self.bot_code_edit = QLineEdit()
-        self.bot_code_edit.setPlaceholderText("Colle le code Epic ici...")
-        self.bot_code_edit.setStyleSheet(
-            f"background:{C_BG3};color:{C_TEXT};border:1px solid rgba(255,255,255,0.06);border-radius:6px;padding:4px 8px;font-size:10px;")
-        self.bot_code_edit.hide()
-        self.bot_validate_btn = btn("✔  Valider", bg=C_GREEN, fg="#000000", size=9)
-        self.bot_validate_btn.clicked.connect(self._submit_bot_code)
-        self.bot_validate_btn.hide()
-        bot_code_row.addWidget(self.bot_code_edit, 1)
-        bot_code_row.addWidget(self.bot_validate_btn)
-        bot_layout.addLayout(bot_code_row)
-
-        self.bot_logout_btn = btn("❌  Supprimer le compte", bg=C_BG3, fg=C_MUTE, size=9)
-        self.bot_logout_btn.clicked.connect(self._clear_bot_token)
-        bot_layout.addWidget(self.bot_logout_btn)
-        root.addWidget(bot_card)
-
         # ── SONS ──────────────────────────────────────────────────────────
         root.addWidget(lbl("SONS", C_BLUE, 9, True))
 
@@ -1327,121 +1277,6 @@ class SettingsTab(QWidget):
         row.addStretch()
         row.addWidget(widget)
         return row
-
-    # ── BOT AUTH ──────────────────────────────────────────────────────────
-    def _start_bot_auth(self):
-        import threading, webbrowser
-        self.bot_login_btn.setEnabled(False)
-        self.bot_status.setText("En attente du code Epic...")
-        self.bot_status.setStyleSheet(f"color:{C_MUTE};")
-
-        def _open():
-            try:
-                from rlapi.egs import EGS
-                egs = EGS()
-                auth_url = egs.get_auth_url()
-                egs.close()
-                _open_guest_browser("https://www.epicgames.com/id/login")
-                self._bot_url_ready.emit(auth_url)
-            except Exception as e:
-                self.app.signals.log_event.emit(f"[Bot] Impossible d'ouvrir l'URL Epic : {e}")
-        threading.Thread(target=_open, daemon=True).start()
-        self.bot_instructions.show()
-        self.bot_code_edit.show()
-        self.bot_code_edit.clear()
-        self.bot_code_edit.setFocus()
-        self.bot_validate_btn.show()
-
-    def _show_auth_url(self, auth_url: str):
-        self._bot_auth_url = auth_url
-        self.bot_open_code_btn.show()
-        self.bot_code_edit.show()
-        self.bot_code_edit.clear()
-        self.bot_validate_btn.show()
-
-    def _open_auth_code_page(self):
-        if self._bot_auth_url:
-            _open_guest_browser(self._bot_auth_url)
-
-    def _submit_bot_code(self):
-        import threading, re
-        raw = self.bot_code_edit.text().strip()
-        if not raw:
-            self.bot_status.setText("⚠  Champ vide")
-            self.bot_status.setStyleSheet(f"color:{C_ORG};")
-            return
-        code = extract_auth_code(raw)
-        if not code:
-            self.bot_status.setText("⚠  Code non reconnu")
-            self.bot_status.setStyleSheet(f"color:{C_ORG};")
-            return
-        self.bot_validate_btn.setEnabled(False)
-        self.bot_status.setText("Authentification...")
-        self.bot_status.setStyleSheet(f"color:{C_MUTE};")
-        threading.Thread(target=self._do_bot_auth, args=(code,), daemon=True).start()
-
-    def _do_bot_auth(self, code: str):
-        from rlapi.egs import EGS
-        result = None
-        try:
-            egs = EGS()
-            launcher_token = egs.authenticate_with_code(code)
-            exchange_code = egs.get_exchange_code(launcher_token.access_token)
-            eos_token = egs.exchange_eos_token(exchange_code)
-            result = {
-                "refresh_token": eos_token.refresh_token,
-                "account_id": eos_token.account_id,
-                "account_name": launcher_token.display_name,
-            }
-            egs.close()
-        except Exception as e:
-            self.app.signals.log_event.emit(f"[Bot] Erreur : {e}")
-        self._bot_auth_done.emit(result)
-
-    def _on_auth_finished(self, result):
-        self.bot_instructions.hide()
-        self.bot_open_code_btn.hide()
-        self.bot_code_edit.hide()
-        self.bot_validate_btn.hide()
-        self.bot_validate_btn.setEnabled(True)
-        self.bot_login_btn.setEnabled(True)
-        if result:
-            self.app.config["bot_refresh_token"] = result["refresh_token"]
-            self.app.config["bot_account_id"] = result["account_id"]
-            self.app.config["bot_account_name"] = result["account_name"]
-            self.app.config.save()
-            self.bot_status.setText(f"✓  Connecté : {result['account_name']}")
-            self.bot_status.setStyleSheet(f"color:{C_GREEN};")
-            self.app.signals.log_event.emit("[Bot] Compte bot configuré.")
-            self.app.fetch_mmr_async(force=True)
-        else:
-            self.bot_status.setText("Échec — code invalide ou expiré.")
-            self.bot_status.setStyleSheet(f"color:{C_ORG};")
-            self.app.signals.log_event.emit("[Bot] Échec authentification.")
-
-    def _clear_bot_token(self):
-        self.app.config["bot_refresh_token"] = ""
-        self.app.config["bot_account_id"] = ""
-        self.app.config["bot_account_name"] = ""
-        self.app.config.save()
-        self.bot_status.setText("Non configuré")
-        self.bot_status.setStyleSheet(f"color:{C_ORG};")
-        self.app.signals.log_event.emit("[Bot] Compte bot supprimé.")
-
-    def _load_bot_account_on_startup(self):
-        try:
-            QTimer.singleShot(100, self._update_bot_status_display)
-        except Exception as e:
-            print(f"[Bot] Erreur au chargement : {e}")
-
-    def _update_bot_status_display(self):
-        bot_name = self.app.config.get("bot_account_name", "")
-        if bot_name:
-            self.bot_status.setText(f"✓  Connecté : {bot_name}")
-            self.bot_status.setStyleSheet(f"color:{C_GREEN};")
-        else:
-            self.bot_status.setText("Non configuré")
-            self.bot_status.setStyleSheet(f"color:{C_ORG};")
 
     # ── STREAMER ──────────────────────────────────────────────────────────
     def _on_streamer_mute_changed(self, state):

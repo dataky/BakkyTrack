@@ -152,6 +152,7 @@ DEFAULT_CONFIG = {
     "bot_refresh_token": "",
     "bot_account_id": "",
     "bot_account_name": "",
+    "github_repo": "dataky/BakkyTrack",
 }
 
 

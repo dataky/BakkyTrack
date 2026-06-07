@@ -35,6 +35,8 @@ class MatchService:
         self._match_started       = False
         self._had_opponent        = False
         self._last_update_log_t   = 0.0
+        self._last_ball_speed_t   = 0.0   # throttle émission signal ball_speed (~15Hz)
+        self._BALL_SPEED_INTERVAL = 0.065 # 65ms ≈ 15Hz (identique au throttle de l'overlay)
         self._running  = True
         self._tcp_sock = None
 
@@ -176,7 +178,11 @@ class MatchService:
             self.current_game_state = game
             self.current_players = players
             _ball_speed_kmh = game.get("Ball", {}).get("Speed", 0.0)
-            self.signals.ball_speed_updated.emit(round(_ball_speed_kmh, 3))
+            # Throttle : émettre au max 15Hz (évite de saturer la queue Qt cross-thread à 60Hz)
+            _now_bs = time.monotonic()
+            if _now_bs - self._last_ball_speed_t >= self._BALL_SPEED_INTERVAL:
+                self._last_ball_speed_t = _now_bs
+                self.signals.ball_speed_updated.emit(round(_ball_speed_kmh, 3))
             new_names = tuple(p.get("Name") for p in players)
             if new_names != self._current_player_names:
                 self._current_player_names = new_names

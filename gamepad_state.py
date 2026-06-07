@@ -50,7 +50,7 @@ import time
 import threading
 
 _dsc_last_scan_time = 0.0
-_DSC_SCAN_INTERVAL = 3.0  # limit device enumeration to once every 3 seconds if not active
+_DSC_SCAN_INTERVAL = 10.0  # limit device enumeration to once every 10 seconds if not active
 _dsc_is_scanning = False
 
 def _dsc_scan_worker():
@@ -431,6 +431,17 @@ def _poll_fallback():
 
 _active_backend = -1  # -1 = none, 0 = dualsense, 1 = xinput, 2 = fallback
 
+# ── Cache partagé avec TTL pour éviter les appels XInput/SDL concurrents ─────
+# Plusieurs composants (controller overlay, overlay_hold_loop, hotkey_loop)
+# appelaient get_gamepad_state() simultanément depuis des threads différents,
+# multipliant les appels à XInputGetState() — API partagée avec Rocket League,
+# ce qui provoquait des micro-stalls / freezes dans le jeu.
+# Le cache TTL garantit qu'un seul appel physique est fait par tranche de 30ms.
+_cached_state      = None
+_cached_state_time = 0.0
+_CACHE_TTL_S       = 0.030  # 30ms — adapté à un poll de 20Hz (50ms)
+_cache_lock        = threading.Lock()
+
 def get_gamepad_state(user_index=0):
     """
     Retourne XINPUT_STATE ou None si aucune manette connectée.
@@ -441,7 +452,37 @@ def get_gamepad_state(user_index=0):
       2. Joystick brut pygame  — fallback PS4/PS5 via pygame.joystick
 
     Une fois qu'une manette est trouvée, on ne cherche plus sur les autres backends.
+    Le résultat est mis en cache 30ms pour éviter les appels concurrents depuis
+    plusieurs threads (controller overlay + hotkey loop + overlay hold loop).
     """
+    global _active_backend, _cached_state, _cached_state_time
+
+    now = time.time()
+    # Lecture rapide du cache sans lock (lecture atomique sur Python)
+    if now - _cached_state_time < _CACHE_TTL_S:
+        return _cached_state
+
+    # Acquérir le lock pour effectuer le poll réel
+    if not _cache_lock.acquire(blocking=False):
+        # Un autre thread est déjà en train de poller → retourner le cache même périmé
+        return _cached_state
+
+    try:
+        # Re-vérifier après acquisition (double-check pattern)
+        now = time.time()
+        if now - _cached_state_time < _CACHE_TTL_S:
+            return _cached_state
+
+        st = _get_gamepad_state_raw(user_index)
+        _cached_state      = st
+        _cached_state_time = time.time()
+        return st
+    finally:
+        _cache_lock.release()
+
+
+def _get_gamepad_state_raw(user_index=0):
+    """Poll réel de la manette — appelé uniquement depuis get_gamepad_state()."""
     global _active_backend
 
     # ── Fast path si un backend est déjà actif ──
@@ -464,14 +505,14 @@ def get_gamepad_state(user_index=0):
     if st is not None:
         _active_backend = 0
         return st
-        
+
     # 1. XInput (Windows)
     if sys.platform == "win32":
         st = _poll_xinput(user_index)
         if st is not None:
             _active_backend = 1
             return st
-            
+
     # 2. Joystick brut (fallback)
     st = _poll_fallback()
     if st is not None:

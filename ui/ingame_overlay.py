@@ -42,6 +42,16 @@ class InGameMMROverlay(QMainWindow):
         self._top_timer = QTimer(self)
         self._top_timer.timeout.connect(self._enforce_topmost)
         self._top_timer.start(2000)
+        
+        # Cache font family string and styles to avoid reconstructing them in a loop
+        self._font_family = "'Rajdhani','Segoe UI Semibold','Arial Narrow',Arial,sans-serif"
+        self._last_rebuild_players = []
+        self._last_rebuild_stats = {}
+        self._last_rebuild_playlist = ""
+        self._last_rebuild_rank_mode = ""
+        self._last_rebuild_show_peak = None
+        self._last_rebuild_w = 0
+        self._last_rebuild_h = 0
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -102,7 +112,7 @@ class InGameMMROverlay(QMainWindow):
         pid   = p.get("PrimaryId", "")
         entry = self._stats.get(pid) if pid else None
         status = entry.get("status", "loading") if entry else ("bot" if not pid else "loading")
-        _font = "'Rajdhani','Segoe UI Semibold','Arial Narrow',Arial,sans-serif"
+        _font = self._font_family
         mmr_style  = (f"font-size:{mmr_px}px;font-weight:800;letter-spacing:0.5px;color:white;font-family:{_font};text-shadow:0 1px 4px rgba(0,0,0,0.9);")
         peak_style = (f"font-size:{peak_px}px;font-weight:600;letter-spacing:0.3px;color:#FFD700;font-family:{_font};text-shadow:0 1px 3px rgba(0,0,0,0.8);")
         mute_style = (f"font-size:{mmr_px}px;font-weight:700;letter-spacing:0.5px;color:rgba(200,200,200,0.6);font-family:{_font};text-shadow:0 1px 3px rgba(0,0,0,0.7);")
@@ -131,11 +141,35 @@ class InGameMMROverlay(QMainWindow):
         return ""
 
     def _rebuild(self):
-        for lbl_w in self._labels: lbl_w.deleteLater()
-        self._labels.clear()
-        if not self._players: return
+        if not self._players:
+            for lbl_w in self._labels: lbl_w.deleteLater()
+            self._labels.clear()
+            self._last_rebuild_players = []
+            return
         screen = QApplication.primaryScreen().geometry()
         sw, sh = screen.width(), screen.height()
+        
+        # Check if anything changed before rebuilding the labels to avoid UI lag and layout churn
+        if (self._last_rebuild_players == self._players and
+            self._last_rebuild_stats == self._stats and
+            self._last_rebuild_playlist == self._playlist_key and
+            self._last_rebuild_rank_mode == self._rank_mode and
+            self._last_rebuild_show_peak == self._show_peak and
+            self._last_rebuild_w == sw and
+            self._last_rebuild_h == sh):
+            return
+
+        self._last_rebuild_players = list(self._players)
+        self._last_rebuild_stats = dict(self._stats)
+        self._last_rebuild_playlist = self._playlist_key
+        self._last_rebuild_rank_mode = self._rank_mode
+        self._last_rebuild_show_peak = self._show_peak
+        self._last_rebuild_w = sw
+        self._last_rebuild_h = sh
+
+        for lbl_w in self._labels: lbl_w.deleteLater()
+        self._labels.clear()
+        
         sort_key = lambda p: (-p.get("Score", 0), p.get("PrimaryId", ""))
         blues   = sorted([p for p in self._players if p.get("TeamNum") == 0], key=sort_key)
         oranges = sorted([p for p in self._players if p.get("TeamNum") == 1], key=sort_key)

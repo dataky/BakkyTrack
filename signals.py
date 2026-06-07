@@ -14,3 +14,9 @@ class AppSignals(QObject):
     game_phase_changed = pyqtSignal(str)  # 'lobby', 'ingame'
     trigger_sound = pyqtSignal(str)      # 'goal_scored', 'demo_me', ...
     press_key_sig = pyqtSignal(str, float)  # (key_name, delay)
+    
+    # Signaux Updater
+    update_available = pyqtSignal(str, str, str)  # (version, release_notes, download_url)
+    update_download_progress = pyqtSignal(int)    # pourcentage (0-100)
+    update_downloaded = pyqtSignal(str)           # (chemin_fichier_telecharge)
+    update_error = pyqtSignal(str)                # (message_erreur)

@@ -9,7 +9,7 @@ except ImportError: PYAUTOGUI_AVAILABLE = False
 from PyQt6.QtCore    import Qt, QTimer, QUrl
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
-    QTabWidget, QScrollArea, QFrame,
+    QTabWidget, QScrollArea, QFrame, QMessageBox, QProgressDialog
 )
 from PyQt6.QtGui import QPixmap, QIcon, QColor, QFont
 
@@ -19,6 +19,7 @@ from signals import AppSignals
 from services.match import MatchService
 from services.mmr import MMRService
 from services.sound import SoundService
+from services.updater import UpdaterService
 from utils import (
     _key_display, _key_to_vk, SvgBackground, ResultOverlay,
     enforce_topmost,
@@ -50,6 +51,7 @@ class MainApp(QMainWindow):
         self.db      = DatabaseService()
         self.obs     = OBSWebSocketService(self.config, self.signals)
         self.webhook = DiscordWebhookService(self.config, self.signals)
+        self.updater = UpdaterService(self.config, self.signals)
         # Thread pool centralisé pour toutes les tâches réseau/IO
         self._thread_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="bakkytrack")
         self.overlay_win         = OverlayWindow()
@@ -127,6 +129,12 @@ class MainApp(QMainWindow):
         self.signals.game_phase_changed.connect(self._on_game_phase_changed)
         self.signals.mmr_updated.connect(self._refresh_own_ingame_cache)
         self.signals.mmr_updated.connect(self._on_mmr_updated)
+        
+        self.signals.update_available.connect(self._on_update_available)
+        self.signals.update_download_progress.connect(self._on_update_progress)
+        self.signals.update_downloaded.connect(self._on_update_downloaded)
+        self.signals.update_error.connect(self._on_update_error)
+
         self._overlay_timer = QTimer(self)
         self._overlay_timer.timeout.connect(self._push_overlay)
         self._overlay_timer.start(REFRESH_MS)
@@ -135,8 +143,13 @@ class MainApp(QMainWindow):
         self._ingame_timer.start(700)
         self._running = True
         self._last_sse_stats: dict = {}
+        self._last_overlay_stats: dict = {}
         self._start_http_server()
         self.match.start()
+        
+        # Lancement de la vérification des mises à jour
+        self.updater.check_for_updates()
+        
         self._start_hotkey_listener()
         self.fetch_mmr_async(force=True)
         # Restaurer le mode streamer depuis la config sauvegardée (NE PAS forcer à False)
@@ -334,10 +347,12 @@ class MainApp(QMainWindow):
 
     def _push_overlay(self):
         stats = self._build_stats_dict()
-        self.overlay_win.update_stats(stats)
+        if stats != self._last_overlay_stats:
+            self._last_overlay_stats = stats
+            self.overlay_win.update_stats(stats)
+            if stats != self._last_sse_stats:
+                self._last_sse_stats = stats; self._push_sse("stats", stats)
         self.overlay_auto_tab.refresh_preview(stats)
-        if stats != self._last_sse_stats:
-            self._last_sse_stats = stats; self._push_sse("stats", stats)
 
     def _start_hotkey_listener(self):
         threading.Thread(target=self._hotkey_loop, daemon=True).start()
@@ -573,3 +588,34 @@ class MainApp(QMainWindow):
         for w in dead:
             try: self._sse_clients.remove(w)
             except ValueError: pass
+
+    # ── Auto-Updater ──────────────────────────────────────────────────────────
+    def _on_update_available(self, version, notes, download_url):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Mise à jour disponible")
+        msg.setText(f"La version v{version} de BakkyTrack est disponible !\n\n{notes}")
+        msg.setInformativeText("Voulez-vous la télécharger et l'installer maintenant ?")
+        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+        
+        if msg.exec() == QMessageBox.StandardButton.Yes:
+            self._progress_dialog = QProgressDialog("Téléchargement de la mise à jour...", "Annuler", 0, 100, self)
+            self._progress_dialog.setWindowTitle("Mise à jour")
+            self._progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            self._progress_dialog.setAutoClose(True)
+            self._progress_dialog.show()
+            self.updater.download_update(download_url)
+
+    def _on_update_progress(self, percent):
+        if hasattr(self, '_progress_dialog') and not self._progress_dialog.wasCanceled():
+            self._progress_dialog.setValue(percent)
+
+    def _on_update_downloaded(self, dest_path):
+        if hasattr(self, '_progress_dialog'):
+            self._progress_dialog.setValue(100)
+        self.updater.apply_update_and_restart(dest_path)
+
+    def _on_update_error(self, err_msg):
+        if hasattr(self, '_progress_dialog'):
+            self._progress_dialog.cancel()
+        QMessageBox.warning(self, "Erreur de mise à jour", f"Le téléchargement a échoué :\n{err_msg}")
